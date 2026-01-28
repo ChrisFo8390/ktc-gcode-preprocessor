@@ -79,7 +79,37 @@ Extracts slicer metadata from G-code comments and replaces token placeholders wi
 - `!materials!` → Material types
 - `!temperatures!` → Temperature values
 
-Supports: PrusaSlicer, SuperSlicer, OrcaSlicer, BambuStudio
+**Generic Replacement:**
+
+Scans for all values in the config section with: 
+`; key = ` 
+
+Looks for `!!key!!` in gcode and replaces with those values.  
+
+Example config section at bottom of gcode: 
+```
+; curr_bed_type = Textured PEI Plate
+; default_acceleration = 5000
+; default_bed_type = 
+; default_filament_colour = ;;;
+```
+
+Example print_start macro in Slicer: 
+```
+PRINT_START BED_TYPE="!!curr_bed_type!!"
+```
+
+Resulting print_start after gcode preprocessing has ran:
+```
+PRINT_START BED_TYPE="Textured PEI Plate"
+```
+
+
+**Supports:** 
+- PrusaSlicer
+- SuperSlicer
+- OrcaSlicer
+- BambuStudio
 
 **Example Usage:**
 ```gcode

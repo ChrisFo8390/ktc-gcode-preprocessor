@@ -33,6 +33,7 @@ class TokenReplacer(GcodePreprocessorPlugin):
         self.extract_temperatures = config.get('extract_temperatures', True)
         self.extract_purge_volumes = config.get('extract_purge_volumes', False)
         self.extract_filament_names = config.get('extract_filament_names', False)
+        self.extract_slicer_config = config.get('extract_slicer_config', True)
 
         # Configuration options - Placeholder replacement
         self.replace_placeholders = config.get('replace_placeholders', True)
@@ -44,6 +45,7 @@ class TokenReplacer(GcodePreprocessorPlugin):
         self.temperatures: List[str] = []
         self.purge_volumes: List[str] = []
         self.filament_names: List[str] = []
+        self.slicer_config: Dict[str, str] = {}
         self.tools_used: set = set()
         self.total_toolchanges: int = 0
 
@@ -61,7 +63,7 @@ class TokenReplacer(GcodePreprocessorPlugin):
         return "token_replacer"
 
     def get_description(self) -> str:
-        return "Extracts slicer metadata and replaces token placeholders (!tool_count!, !colors!, etc.)"
+        return "Extracts slicer metadata and replaces token placeholders (!tool_count!, !colors!, !!any_slicer_key!!, etc.)"
 
     def pre_process(self, file_path: str, context: PreprocessorContext) -> bool:
         """
@@ -72,6 +74,16 @@ class TokenReplacer(GcodePreprocessorPlugin):
         lines = PreprocessorUtilities.read_file_lines(file_path)
 
         for line in lines:
+            # Extract all slicer config key=value pairs for generic replacement
+            if self.extract_slicer_config and GcodePatterns.is_comment(line):
+                match = GcodePatterns.SLICER_CONFIG.match(line)
+                if match:
+                    key = match.group(1).strip()
+                    value = match.group(2).strip()
+                    # Only store first occurrence of each key
+                    if key not in self.slicer_config:
+                        self.slicer_config[key] = value
+
             # Detect slicer
             if not self.slicer and GcodePatterns.is_comment(line):
                 match = GcodePatterns.SLICER_NAME.match(line)
@@ -144,6 +156,8 @@ class TokenReplacer(GcodePreprocessorPlugin):
             self.logger.info(f"token_replacer: Materials: {self.materials}")
         if self.extract_temperatures:
             self.logger.info(f"token_replacer: Temperatures: {self.temperatures}")
+        if self.extract_slicer_config:
+            self.logger.info(f"token_replacer: Slicer config entries: {len(self.slicer_config)}")
 
         # Store metadata in context for other processors
         context.set_metadata('slicer', self.slicer)
@@ -154,6 +168,7 @@ class TokenReplacer(GcodePreprocessorPlugin):
         context.set_metadata('temperatures', self.temperatures)
         context.set_metadata('purge_volumes', self.purge_volumes)
         context.set_metadata('filament_names', self.filament_names)
+        context.set_metadata('slicer_config', self.slicer_config)
 
         # Build replacement map for placeholder substitution
         if self.replace_placeholders:
@@ -180,12 +195,23 @@ class TokenReplacer(GcodePreprocessorPlugin):
         if not self.replace_placeholders or GcodePatterns.is_comment(line):
             return [line]
 
-        # Check if line contains any placeholders
         modified_line = line
+
+        # Check if line contains any standard placeholders (!key!)
         for placeholder, replacement in self.replacement_map.items():
             if placeholder in modified_line:
                 modified_line = modified_line.replace(placeholder, replacement)
                 self.logger.info(f"token_replacer: Replaced {placeholder} with {replacement} at line {context.current_line}")
+
+        # Check for generic slicer config placeholders (!!key!!)
+        if self.extract_slicer_config and '!!' in modified_line:
+            def replace_generic(match):
+                key = match.group(1)
+                if key in self.slicer_config:
+                    self.logger.info(f"token_replacer: Replaced !!{key}!! with {self.slicer_config[key]} at line {context.current_line}")
+                    return self.slicer_config[key]
+                return match.group(0)  # Keep original if key not found
+            modified_line = GcodePatterns.GENERIC_PLACEHOLDER.sub(replace_generic, modified_line)
 
         return [modified_line]
 

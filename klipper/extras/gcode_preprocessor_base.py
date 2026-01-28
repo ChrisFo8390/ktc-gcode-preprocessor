@@ -133,8 +133,12 @@ class GcodePatterns:
     PURGE_VOLUMES = re.compile(r'^;\s*(?:flush_volumes_matrix|wiping_volumes_matrix)\s*=\s*(.*)$', re.IGNORECASE)
     FILAMENT_NAMES = re.compile(r'^;\s*filament_settings_id\s*=\s*(.*)$', re.IGNORECASE)
 
+    # Generic slicer config pattern: ; key = value
+    SLICER_CONFIG = re.compile(r'^;\s*(\w+)\s*=\s*(.*)$')
+
     # Placeholder patterns
     PLACEHOLDER = re.compile(r'!(\w+)!')
+    GENERIC_PLACEHOLDER = re.compile(r'!!(\w+)!!')
 
     @staticmethod
     def is_comment(line: str) -> bool:
