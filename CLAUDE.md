@@ -13,9 +13,10 @@ This is a Klipper G-code preprocessor system that automatically optimizes and en
 # Install the preprocessor system
 ./install.sh
 
-# Manual linking of Klipper modules
-ln -sf ~/klipper-gcode-preprocessor/klipper/extras/gcode_preprocessor*.py ~/klipper/klippy/extras/
-ln -sf ~/klipper-gcode-preprocessor/klipper/extras/preprocessors ~/klipper/klippy/extras/
+# Manual linking of Klipper modules (what install.sh does)
+ln -sfn ~/ktc-gcode-preprocessor/klipper/extras/gcode_preprocessor*.py ~/klipper/klippy/extras/
+ln -sfn ~/ktc-gcode-preprocessor/klipper/extras/preprocessors ~/klipper/klippy/extras/preprocessors
+ln -sfn ~/ktc-gcode-preprocessor/moonraker/gcode_preprocessor.py ~/moonraker/moonraker/components/
 
 # Restart Klipper
 sudo systemctl restart klipper
@@ -44,7 +45,8 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
 
 1. **Pre-process Pass** (`pre_process()`): Scan entire file, gather metadata, build usage maps
    - Example: `token_replacer` scans for slicer comments
-   - Example: `unused_tool_shutdown` builds tool usage map to find last usages
+   - Example: `idle_tool_shutdown` builds tool usage map to find last usages
+   - Processor instances are reused for every file, so `pre_process()` must reset all per-file state
 
 2. **Line-by-line Pass** (`process_line()`): Transform individual G-code lines
    - Each processor receives each line and returns a list of output lines (0, 1, or many)
@@ -82,6 +84,8 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
    - See `klipper/extras/preprocessors/token_replacer.py`
 
 2. **idle_tool_shutdown** (formerly unused_tool_shutdown)
+   - Re-selecting the already active tool is ignored for cooldown decisions
+   - Optional `tool_heaters` maps tool numbers to heater names (`SET_HEATER_TEMPERATURE` instead of `M104 T{n}`)
    - Two modes: end-of-use shutdown (always on) + predictive idle shutdown (optional)
    - **End-of-use**: Inserts `M104 T{n} S0` after last tool usage in file
    - **Predictive idle**: Looks ahead to predict when tool will be idle > threshold, shuts down immediately
@@ -101,7 +105,7 @@ The system recognizes multiple tool change formats via regex patterns in `GcodeP
 - Happy Hare MMU: `MMU_CHANGE_TOOL TOOL=0`
 
 **Processing Fingerprint:**
-Files are marked with `; processed by klipper-gcode-preprocessor` on first line to prevent reprocessing.
+Files are marked with `; processed by ktc-gcode preprocessor` (plus ` (slicer: <name>)` when detected) on first line to prevent reprocessing. The legacy marker `; processed by klipper-gcode-preprocessor` is still recognized (`LEGACY_FINGERPRINTS` in `gcode_preprocessor_base.py`, `FINGERPRINT_REGEX` in the Moonraker component).
 
 **Context Sharing:**
 `PreprocessorContext.metadata` dict allows processors to share data between the pre-process and line-by-line phases. For example, `token_replacer` scans the file in `pre_process()` and uses the gathered data in `process_line()` to replace token placeholders.
@@ -195,18 +199,22 @@ Processors execute in the order they appear in the `processors` list. Typical or
 
 ## File Locations
 
-- **Source:** `/home/pi/klipper-gcode-preprocessor/`
-- **Klipper Modules:** Symlinked to `~/klipper/klippy/extras/`
+- **Repository:** https://github.com/ChrisFo8390/ktc-gcode-preprocessor (fork of jwellman80/klipper-gcode-preprocessor)
+- **Source:** `~/ktc-gcode-preprocessor/` (install.sh uses the directory it is run from)
+- **Klipper Modules:** Symlinked to `~/klipper/klippy/extras/` (`preprocessors/` as a directory link)
 - **Moonraker Component:** Symlinked to `~/moonraker/moonraker/components/`
 - **Configuration:** `~/printer_data/config/gcode-preprocessor/preprocessor.cfg`
 - **Logs:** `~/printer_data/logs/klippy.log` (Klipper) or `~/printer_data/logs/moonraker.log`
 
 ## Important Development Notes
 
-- **Atomic File Operations:** The system writes to `.preprocessing` temp file, then uses `os.replace()` for atomic swap
-- **Config Access:** Processor configs use dict-like access: `config.get('key', default)`
-- **Line Preservation:** Lines read with `readlines()` include `\n`, preserve this in output
+- **Atomic File Operations:** The system streams output to a `.preprocessing` temp file, then uses `os.replace()` for atomic swap
+- **Config Access:** Use `config.getboolean/getint/getfloat` for typed values; `config.get()` returns strings
+- **Line Preservation:** Lines include `\n`, preserve this in output; files are read/written with `surrogateescape` so non-UTF-8 bytes survive
 - **Error Handling:** Return `False` from `pre_process()` or `post_process()` to abort processing
-- **Import Path:** Processors must handle import paths (see `sys.path.insert(0, ...)` in existing processors)
-- **Klipper Module Loading:** Use `self.printer.try_load_module(config, module_name)` pattern
+- **Import Path:** Processors import the base module relatively (`from ..gcode_preprocessor_base import ...`) with an `ImportError` fallback to the absolute import used by the Moonraker script; do not modify `sys.path` inside processors
+- **Shared Pipeline:** `run_pipeline()` in `gcode_preprocessor_base.py` is used by both the Klipper module and the Moonraker script; options are read through `ProcessorConfig` in both
+- **Console Messages:** The Moonraker component wraps `MetadataStorage._run_extract_metadata` and sends start/result messages via `server.send_event("server:gcode_response", ...)` only when `print_stats.state` is not printing/paused and `will_preprocess()` is true
+- **Klipper Command:** `PREPROCESS_GCODE_FILE` runs the pipeline in a forked child process (never block the reactor)
+- **Tests:** `python3 -m unittest discover -s tests -v`
 - **Context Metadata:** Use `context.set_metadata()` and `context.get_metadata()` for processor communication

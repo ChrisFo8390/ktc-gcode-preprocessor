@@ -1,62 +1,91 @@
 #!/bin/bash
-# Klipper G-code Preprocessor Installation Script
+# KTC G-code Preprocessor Installation Script
 #
 # This script installs the G-code preprocessor system for Klipper
 # It can be used standalone or integrated with klipper-toolchanger
+#
+# Usage (from a clone of the repository):
+#   git clone https://github.com/ChrisFo8390/ktc-gcode-preprocessor.git ~/ktc-gcode-preprocessor
+#   ~/ktc-gcode-preprocessor/install.sh
 
-KLIPPER_PATH="${HOME}/klipper"
-MOONRAKER_PATH="${HOME}/moonraker"
-INSTALL_PATH="${HOME}/klipper-gcode-preprocessor"
-CONFIG_PATH="${HOME}/printer_data/config"
+REPO_URL="https://github.com/ChrisFo8390/ktc-gcode-preprocessor.git"
+REPO_NAME="ktc-gcode-preprocessor"
+KLIPPER_PATH="${KLIPPER_PATH:-${HOME}/klipper}"
+MOONRAKER_PATH="${MOONRAKER_PATH:-${HOME}/moonraker}"
+CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 
 set -eu
 export LC_ALL=C
 
+# Install from the directory this script lives in when it is a clone of the
+# repository, otherwise clone it to ~/ktc-gcode-preprocessor
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/klipper/extras/gcode_preprocessor.py" ]; then
+    INSTALL_PATH="${SCRIPT_DIR}"
+else
+    INSTALL_PATH="${INSTALL_PATH:-${HOME}/${REPO_NAME}}"
+fi
+
 function preflight_checks {
     if [ "$EUID" -eq 0 ]; then
         echo "[PRE-CHECK] This script must not be run as root!"
-        exit -1
+        exit 1
     fi
 
     if [ "$(sudo systemctl list-units --full -all -t service --no-legend | grep -F 'klipper.service')" ]; then
         printf "[PRE-CHECK] Klipper service found! Continuing...\n\n"
     else
         echo "[ERROR] Klipper service not found, please install Klipper first!"
-        exit -1
+        exit 1
+    fi
+
+    if [ ! -d "${KLIPPER_PATH}/klippy/extras" ]; then
+        echo "[ERROR] Klipper not found at ${KLIPPER_PATH} (set KLIPPER_PATH=...)"
+        exit 1
     fi
 }
 
 function check_download {
     local installdirname installbasename
-    installdirname="$(dirname ${INSTALL_PATH})"
-    installbasename="$(basename ${INSTALL_PATH})"
+    installdirname="$(dirname "${INSTALL_PATH}")"
+    installbasename="$(basename "${INSTALL_PATH}")"
 
     if [ ! -d "${INSTALL_PATH}" ]; then
-        echo "[DOWNLOAD] Downloading repository..."
-        if git -C $installdirname clone https://github.com/jwellman80/klipper-gcode-preprocessor.git $installbasename; then
-            chmod +x ${INSTALL_PATH}/install.sh
+        echo "[DOWNLOAD] Downloading repository from ${REPO_URL}..."
+        if git -C "${installdirname}" clone "${REPO_URL}" "${installbasename}"; then
+            chmod +x "${INSTALL_PATH}/install.sh"
             printf "[DOWNLOAD] Download complete!\n\n"
         else
             echo "[ERROR] Download of git repository failed!"
-            echo "[INFO] Continuing with local installation..."
+            exit 1
         fi
     else
-        printf "[DOWNLOAD] Repository already found locally. Continuing...\n\n"
+        printf "[DOWNLOAD] Using repository at %s\n\n" "${INSTALL_PATH}"
     fi
 }
 
 function link_klipper_modules {
     echo "[INSTALL] Linking G-code preprocessor modules to Klipper..."
 
-    # Link main modules
-    ln -sfn "${INSTALL_PATH}"/klipper/extras/gcode_preprocessor_base.py "${KLIPPER_PATH}/klippy/extras/"
-    ln -sfn "${INSTALL_PATH}"/klipper/extras/gcode_preprocessor.py "${KLIPPER_PATH}/klippy/extras/"
+    local extras="${KLIPPER_PATH}/klippy/extras"
 
-    # Link preprocessor plugins
-    mkdir -p "${KLIPPER_PATH}/klippy/extras/preprocessors"
-    for file in "${INSTALL_PATH}"/klipper/extras/preprocessors/*.py; do
-        ln -sfn "${file}" "${KLIPPER_PATH}/klippy/extras/preprocessors/"
-    done
+    # Link main modules
+    ln -sfn "${INSTALL_PATH}"/klipper/extras/gcode_preprocessor_base.py "${extras}/"
+    ln -sfn "${INSTALL_PATH}"/klipper/extras/gcode_preprocessor.py "${extras}/"
+
+    # Link the plugin directory as a whole, so processors added by a later
+    # update are available without re-running this script. Older versions
+    # created a real directory with one link per file; replace it.
+    if [ -d "${extras}/preprocessors" ] && [ ! -L "${extras}/preprocessors" ]; then
+        find "${extras}/preprocessors" -maxdepth 1 -type l -delete
+        rm -rf "${extras}/preprocessors/__pycache__"
+        if ! rmdir "${extras}/preprocessors" 2>/dev/null; then
+            local backup="${extras}/preprocessors.bak.$(date +%Y%m%d%H%M%S)"
+            mv "${extras}/preprocessors" "${backup}"
+            echo "[WARNING] Existing files in ${extras}/preprocessors moved to ${backup}"
+        fi
+    fi
+    ln -sfn "${INSTALL_PATH}"/klipper/extras/preprocessors "${extras}/preprocessors"
 
     echo "[INSTALL] Klipper modules linked successfully!"
 }
@@ -66,7 +95,7 @@ function install_config {
 
     mkdir -p "${CONFIG_PATH}"/gcode-preprocessor
 
-    # Copy config file if it doesn't exist, otherwise show diff
+    # Copy config file if it doesn't exist
     if [ ! -f "${CONFIG_PATH}/gcode-preprocessor/preprocessor.cfg" ]; then
         cp "${INSTALL_PATH}"/config/gcode-preprocessor.cfg "${CONFIG_PATH}"/gcode-preprocessor/preprocessor.cfg
         echo "[INSTALL] Configuration file installed to ${CONFIG_PATH}/gcode-preprocessor/preprocessor.cfg"
@@ -82,9 +111,21 @@ function install_config {
     echo ""
 }
 
+# Append a section to moonraker.conf unless a section with that header exists
+function add_moonraker_section {
+    local conf="$1" header="$2" body="$3"
+    if grep -qF "[${header}]" "${conf}"; then
+        echo "[INFO] [${header}] already present in ${conf} - not changed"
+    else
+        printf "\n[%s]\n%s\n" "${header}" "${body}" >> "${conf}"
+        echo "[INSTALL] Added [${header}] to ${conf}"
+    fi
+}
+
 function install_moonraker_component {
     echo -e "\n\nInstall Moonraker component for automatic G-code preprocessing?"
-    echo "This enables automatic preprocessing when files are uploaded via Mainsail/Fluidd."
+    echo "This enables automatic preprocessing when files are uploaded via Mainsail/Fluidd"
+    echo "and adds update manager support for ${REPO_NAME} to moonraker.conf."
     echo "You can skip this and use manual preprocessing with PREPROCESS_GCODE_FILE instead."
     echo ""
     echo "1. Yes, install Moonraker component (recommended)"
@@ -93,21 +134,38 @@ function install_moonraker_component {
 
     case $moonraker_choice in
         1)
-            if [ -d "${MOONRAKER_PATH}/moonraker/components" ]; then
-                echo "[INSTALL] Installing Moonraker component..."
-                ln -sfn "${INSTALL_PATH}"/moonraker/gcode_preprocessor.py "${MOONRAKER_PATH}"/moonraker/components/
-                echo "[INSTALL] Moonraker component installed!"
-                echo ""
-                echo "[INFO] Add the following to your moonraker.conf to enable automatic preprocessing:"
+            if [ ! -d "${MOONRAKER_PATH}/moonraker/components" ]; then
+                echo "[WARNING] Moonraker components directory not found at ${MOONRAKER_PATH}/moonraker/components"
+                echo "[WARNING] Moonraker component installation skipped."
+                echo "[INFO] You can still use manual preprocessing with PREPROCESS_GCODE_FILE"
+                return
+            fi
+            echo "[INSTALL] Installing Moonraker component..."
+            ln -sfn "${INSTALL_PATH}"/moonraker/gcode_preprocessor.py "${MOONRAKER_PATH}"/moonraker/components/
+            echo "[INSTALL] Moonraker component installed!"
+
+            local conf="${CONFIG_PATH}/moonraker.conf"
+            if [ -f "${conf}" ]; then
+                cp "${conf}" "${conf}.bak.$(date +%Y%m%d%H%M%S)"
+                add_moonraker_section "${conf}" "gcode_preprocessor" "enable_preprocessing: True"
+                add_moonraker_section "${conf}" "update_manager ${REPO_NAME}" \
+"type: git_repo
+path: ${INSTALL_PATH}
+origin: ${REPO_URL}
+primary_branch: main
+managed_services: klipper moonraker"
+            else
+                echo "[WARNING] ${conf} not found. Add the following to your moonraker.conf:"
                 echo ""
                 echo "[gcode_preprocessor]"
                 echo "enable_preprocessing: True"
                 echo ""
-                echo "[INFO] Then restart Moonraker: sudo systemctl restart moonraker"
-            else
-                echo "[WARNING] Moonraker components directory not found at ${MOONRAKER_PATH}/moonraker/components"
-                echo "[WARNING] Moonraker component installation skipped."
-                echo "[INFO] You can still use manual preprocessing with PREPROCESS_GCODE_FILE"
+                echo "[update_manager ${REPO_NAME}]"
+                echo "type: git_repo"
+                echo "path: ${INSTALL_PATH}"
+                echo "origin: ${REPO_URL}"
+                echo "primary_branch: main"
+                echo "managed_services: klipper moonraker"
             fi
             ;;
         2)
@@ -116,7 +174,7 @@ function install_moonraker_component {
             ;;
         *)
             echo "[ERROR] Invalid option selected!"
-            exit -1
+            exit 1
             ;;
     esac
 }
@@ -170,14 +228,14 @@ function show_completion_message {
     echo "4. List available processors:"
     echo "   LIST_GCODE_PROCESSORS"
     echo ""
-    echo "Documentation: ${INSTALL_PATH}/docs/README.md"
+    echo "Documentation: ${INSTALL_PATH}/README.md"
     echo "Example test file: ${INSTALL_PATH}/examples/test_sample.gcode"
     echo ""
 }
 
 # Main installation flow
 printf "\n============================================\n"
-echo "  Klipper G-code Preprocessor Installer"
+echo "  KTC G-code Preprocessor Installer"
 printf "============================================\n\n"
 
 # Run steps

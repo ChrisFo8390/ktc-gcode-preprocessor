@@ -2,17 +2,24 @@
 # Use this as a starting point for creating your own custom G-code preprocessor
 
 from typing import List
-import sys
-import os
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from gcode_preprocessor_base import (
-    GcodePreprocessorPlugin,
-    PreprocessorContext,
-    GcodePatterns,
-    PreprocessorUtilities
-)
+# Import the base classes. Klipper loads processors as
+# extras.preprocessors.<name>, the Moonraker script imports them with the
+# extras directory on sys.path, so support both.
+try:
+    from ..gcode_preprocessor_base import (
+        GcodePreprocessorPlugin,
+        PreprocessorContext,
+        GcodePatterns,
+        PreprocessorUtilities
+    )
+except ImportError:
+    from gcode_preprocessor_base import (
+        GcodePreprocessorPlugin,
+        PreprocessorContext,
+        GcodePatterns,
+        PreprocessorUtilities
+    )
 
 
 class ExampleProcessor(GcodePreprocessorPlugin):
@@ -145,8 +152,7 @@ class ExampleProcessor(GcodePreprocessorPlugin):
         self.tools_seen.clear()
 
         # Example: Read entire file to gather statistics
-        # lines = PreprocessorUtilities.read_file_lines(file_path)
-        # for line in lines:
+        # for line in PreprocessorUtilities.iter_file_lines(file_path):
         #     # Analyze lines here
         #     pass
 

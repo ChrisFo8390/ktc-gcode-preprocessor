@@ -2,17 +2,24 @@
 # Extracts slicer metadata from G-code comments and replaces token placeholders
 
 from typing import Dict, List, Optional
-import sys
-import os
+import re
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from gcode_preprocessor_base import (
-    GcodePreprocessorPlugin,
-    PreprocessorContext,
-    GcodePatterns,
-    PreprocessorUtilities
-)
+try:
+    # Loaded by Klipper as extras.preprocessors.token_replacer
+    from ..gcode_preprocessor_base import (
+        GcodePreprocessorPlugin,
+        PreprocessorContext,
+        GcodePatterns,
+        PreprocessorUtilities
+    )
+except ImportError:
+    # Loaded standalone (Moonraker script) with the extras dir on sys.path
+    from gcode_preprocessor_base import (
+        GcodePreprocessorPlugin,
+        PreprocessorContext,
+        GcodePatterns,
+        PreprocessorUtilities
+    )
 
 
 class TokenReplacer(GcodePreprocessorPlugin):
@@ -27,18 +34,25 @@ class TokenReplacer(GcodePreprocessorPlugin):
         super().__init__(config, logger)
 
         # Configuration options - Metadata extraction
-        self.extract_tools = config.get('extract_tools', True)
-        self.extract_colors = config.get('extract_colors', True)
-        self.extract_materials = config.get('extract_materials', True)
-        self.extract_temperatures = config.get('extract_temperatures', True)
-        self.extract_purge_volumes = config.get('extract_purge_volumes', False)
-        self.extract_filament_names = config.get('extract_filament_names', False)
-        self.extract_slicer_config = config.get('extract_slicer_config', True)
+        self.extract_tools = config.getboolean('extract_tools', True)
+        self.extract_colors = config.getboolean('extract_colors', True)
+        self.extract_materials = config.getboolean('extract_materials', True)
+        self.extract_temperatures = config.getboolean('extract_temperatures', True)
+        self.extract_purge_volumes = config.getboolean('extract_purge_volumes', False)
+        self.extract_filament_names = config.getboolean('extract_filament_names', False)
+        self.extract_slicer_config = config.getboolean('extract_slicer_config', True)
 
         # Configuration options - Placeholder replacement
-        self.replace_placeholders = config.get('replace_placeholders', True)
+        self.replace_placeholders = config.getboolean('replace_placeholders', True)
+        # Klipper truncates a command at ';' and treats '#' as a comment in
+        # extended commands, so multi-value slicer settings like
+        # "PLA;PETG" or "#FF0000;#00FF00" would silently cut the line.
+        self.sanitize_generic_values = config.getboolean('sanitize_generic_values', True)
 
-        # Internal state
+        self._reset_state()
+
+    def _reset_state(self):
+        """Reset all per-file state (the processor instance is reused)"""
         self.slicer: Optional[str] = None
         self.colors: List[str] = []
         self.materials: List[str] = []
@@ -71,9 +85,9 @@ class TokenReplacer(GcodePreprocessorPlugin):
         """
         self.logger.info(f"token_replacer: Scanning file for metadata")
 
-        lines = PreprocessorUtilities.read_file_lines(file_path)
+        self._reset_state()
 
-        for line in lines:
+        for line in PreprocessorUtilities.iter_file_lines(file_path):
             # Extract all slicer config key=value pairs for generic replacement
             if self.extract_slicer_config and GcodePatterns.is_comment(line):
                 match = GcodePatterns.SLICER_CONFIG.match(line)
@@ -123,7 +137,6 @@ class TokenReplacer(GcodePreprocessorPlugin):
             if self.extract_temperatures and not self.found_temperatures and GcodePatterns.is_comment(line):
                 match = GcodePatterns.TEMPERATURE.match(line)
                 if match:
-                    import re
                     temps_csv = re.split('[;,]', match.group(1).strip())
                     self.temperatures.extend([t.strip() for t in temps_csv])
                     self.found_temperatures = True
@@ -140,9 +153,8 @@ class TokenReplacer(GcodePreprocessorPlugin):
             if self.extract_filament_names and not self.found_filament_names and GcodePatterns.is_comment(line):
                 match = GcodePatterns.FILAMENT_NAMES.match(line)
                 if match:
-                    import re
-                    names_csv = re.split('[;,]', match.group(2).strip())
-                    self.filament_names.extend([n.strip() for n in names_csv])
+                    names_csv = re.split('[;,]', match.group(1).strip())
+                    self.filament_names.extend([n.strip().strip('"') for n in names_csv])
                     self.found_filament_names = True
 
         # Log what we found
@@ -197,23 +209,39 @@ class TokenReplacer(GcodePreprocessorPlugin):
 
         modified_line = line
 
-        # Check if line contains any standard placeholders (!key!)
-        for placeholder, replacement in self.replacement_map.items():
-            if placeholder in modified_line:
-                modified_line = modified_line.replace(placeholder, replacement)
-                self.logger.info(f"token_replacer: Replaced {placeholder} with {replacement} at line {context.current_line}")
-
-        # Check for generic slicer config placeholders (!!key!!)
+        # Generic slicer config placeholders (!!key!!) first, so that a
+        # built-in token like !tools! cannot match inside !!tools!!
         if self.extract_slicer_config and '!!' in modified_line:
             def replace_generic(match):
                 key = match.group(1)
                 if key in self.slicer_config:
-                    self.logger.info(f"token_replacer: Replaced !!{key}!! with {self.slicer_config[key]} at line {context.current_line}")
-                    return self.slicer_config[key]
+                    value = self._generic_value(key)
+                    self.logger.info(f"token_replacer: Replaced !!{key}!! with {value} at line {context.current_line}")
+                    return value
                 return match.group(0)  # Keep original if key not found
             modified_line = GcodePatterns.GENERIC_PLACEHOLDER.sub(replace_generic, modified_line)
 
+        # Built-in placeholders (!key!), not touching unresolved !!key!!
+        if '!' in modified_line:
+            def replace_builtin(match):
+                placeholder = match.group(0)
+                replacement = self.replacement_map.get(placeholder)
+                if replacement is None:
+                    return placeholder
+                self.logger.info(f"token_replacer: Replaced {placeholder} with {replacement} at line {context.current_line}")
+                return replacement
+            modified_line = GcodePatterns.PLACEHOLDER.sub(replace_builtin, modified_line)
+
         return [modified_line]
+
+    def _generic_value(self, key: str) -> str:
+        value = self.slicer_config[key]
+        if not self.sanitize_generic_values:
+            return value
+        sanitized = value.replace(';', ',').replace('#', '')
+        if sanitized != value:
+            self.logger.info(f"token_replacer: Sanitized value of !!{key}!! ('{value}' -> '{sanitized}')")
+        return sanitized
 
     def post_process(self, file_path: str, context: PreprocessorContext) -> bool:
         """

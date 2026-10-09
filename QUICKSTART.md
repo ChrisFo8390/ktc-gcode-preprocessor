@@ -6,14 +6,15 @@ Get the G-code preprocessor running in 5 minutes!
 
 ```bash
 cd ~
-git clone https://github.com/jwellman80/klipper-gcode-preprocessor.git
-cd klipper-gcode-preprocessor
+git clone https://github.com/ChrisFo8390/ktc-gcode-preprocessor.git
+cd ktc-gcode-preprocessor
 ./install.sh
 ```
 
 Follow the prompts:
-1. Answer "1" for Moonraker integration (recommended)
-2. Answer "1" to restart Klipper
+1. Answer "1" for Moonraker integration (recommended). This also adds
+   `[gcode_preprocessor]` and the update manager entry to `moonraker.conf`.
+2. Answer "1" to restart Klipper and Moonraker
 
 ## Configuration (1 minute)
 
@@ -32,10 +33,10 @@ sudo systemctl restart klipper
 
 ### Option 1: Upload a Test File
 1. Upload the included test file to Mainsail/Fluidd:
-   - File: `~/klipper-gcode-preprocessor/examples/test_sample.gcode`
+   - File: `~/ktc-gcode-preprocessor/examples/test_sample.gcode`
 2. Check the first line - it should now say:
    ```gcode
-   ; processed by klipper-gcode-preprocessor
+   ; processed by ktc-gcode preprocessor
    ```
 3. Look for inserted cooldown commands:
    ```gcode
@@ -55,7 +56,7 @@ LIST_GCODE_PROCESSORS
 
 You should see:
 - token_replacer
-- unused_tool_shutdown
+- idle_tool_shutdown
 
 ## What It Does
 
@@ -75,14 +76,14 @@ You should see:
 Edit `~/printer_data/config/gcode-preprocessor/preprocessor.cfg`:
 
 ```ini
-# Customize unused tool shutdown
-[preprocessor unused_tool_shutdown]
+# Customize idle tool shutdown
+[gcode_preprocessor idle_tool_shutdown]
 exclude_tools: 0  # Optional: exclude T0 from shutdown
 ```
 
 ## Next Steps
 
-- Read full docs: `docs/README.md`
+- Read full docs: `README.md`
 - Try placeholders in your macros
 - Write custom processors
 
@@ -98,7 +99,6 @@ exclude_tools: 0  # Optional: exclude T0 from shutdown
 
 **Need help?**
 - Full documentation: `README.md`
-- Detailed guide: `docs/README.md`
 - GitHub Issues for bugs
 
 ## Example: Using Placeholders

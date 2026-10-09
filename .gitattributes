@@ -1,0 +1,7 @@
+# Store text files with LF line endings in the repository, whatever the
+# local core.autocrlf setting is; a CRLF install.sh would fail on the printer
+# with "$'\r': command not found"
+* text=auto
+*.sh text eol=lf
+*.png binary
+*.jpg binary

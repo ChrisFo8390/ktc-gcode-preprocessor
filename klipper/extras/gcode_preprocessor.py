@@ -2,68 +2,24 @@
 
 import os
 import logging
+import importlib
+import multiprocessing
+import traceback
 from typing import Dict, List, Optional, Any
 from . import gcode_preprocessor_base
 
 
 class PreprocessorConfigSection:
-    """Dummy class to register [preprocessor ...] config sections with Klipper"""
+    """Holds the options of a [gcode_preprocessor <name>] section"""
     def __init__(self, config):
         self.name = config.get_name()
+        # Read every option so Klipper accepts processor specific settings
+        # (including those of custom processors) without a config error
+        self.values = {option: config.get(option)
+                       for option in config.get_prefix_options('')}
 
-
-class ProcessorConfig:
-    """Config helper for processors to read their settings"""
-    def __init__(self, section_name, parent_config):
-        self.section_name = section_name
-        self.parent_config = parent_config
-
-        # Try to load the actual config section if it exists
-        self.config_section = None
-        try:
-            # Get the printer's configfile object
-            printer = parent_config.get_printer()
-            configfile = printer.lookup_object('configfile')
-            # Try to get this section from the raw config
-            if hasattr(configfile, 'fileconfig'):
-                if configfile.fileconfig.has_section(section_name):
-                    self.config_section = configfile.fileconfig[section_name]
-        except:
-            pass
-
-    def get(self, key, default=None):
-        """Get a config value as string"""
-        if self.config_section and key in self.config_section:
-            return self.config_section[key]
-        return default
-
-    def getboolean(self, key, default=False):
-        """Get a config value as boolean"""
-        value = self.get(key, None)
-        if value is None:
-            return default
-        value_str = str(value).lower()
-        return value_str in ['true', '1', 'yes', 'on']
-
-    def getint(self, key, default=0):
-        """Get a config value as int"""
-        value = self.get(key, None)
-        if value is None:
-            return default
-        try:
-            return int(value)
-        except:
-            return default
-
-    def getfloat(self, key, default=0.0):
-        """Get a config value as float"""
-        value = self.get(key, None)
-        if value is None:
-            return default
-        try:
-            return float(value)
-        except:
-            return default
+    def get_status(self, eventtime):
+        return {'options': dict(self.values)}
 
 
 class GcodePreprocessor:
@@ -86,8 +42,12 @@ class GcodePreprocessor:
         # Register for klippy events
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
 
-        # Register remote methods for Moonraker integration
-        self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        self.gcode.register_command("PREPROCESS_GCODE_FILE",
+                                    self.cmd_PREPROCESS_GCODE_FILE,
+                                    desc=self.cmd_PREPROCESS_GCODE_FILE_help)
+        self.gcode.register_command("LIST_GCODE_PROCESSORS",
+                                    self.cmd_LIST_GCODE_PROCESSORS,
+                                    desc=self.cmd_LIST_GCODE_PROCESSORS_help)
 
     def _handle_connect(self):
         """Handle Klipper connect event"""
@@ -95,39 +55,26 @@ class GcodePreprocessor:
         if self.enabled:
             self._load_processors()
 
-    def _handle_ready(self):
-        """Handle Klipper ready event - register remote methods"""
-        # Register remote methods that Moonraker can call
-        self.gcode.register_command("PREPROCESS_GCODE_FILE",
-                                   self.cmd_PREPROCESS_GCODE_FILE,
-                                   desc="Preprocess a G-code file")
-        self.gcode.register_command("LIST_GCODE_PROCESSORS",
-                                   self.cmd_LIST_GCODE_PROCESSORS,
-                                   desc="List available G-code processors")
+    def _processor_config(self, processor_name: str):
+        """Build the config helper from the [gcode_preprocessor <name>] section"""
+        section_name = f"gcode_preprocessor {processor_name}"
+        section = self.printer.lookup_object(section_name, None)
+        values = section.values if section is not None else {}
+        return gcode_preprocessor_base.ProcessorConfig(section_name, values, logging)
 
     def _load_processors(self):
         """Load and initialize all configured processors"""
         for index, processor_name in enumerate(self.processors_list):
             try:
-                # Try to load the processor module
-                module_name = f"preprocessors.{processor_name}"
                 try:
-                    # Import the processor module dynamically
-                    import importlib
-                    module = importlib.import_module(f".{module_name}", package="extras")
+                    module = importlib.import_module(f".preprocessors.{processor_name}", package="extras")
                 except ImportError as e:
                     logging.warning(f"gcode_preprocessor: Could not load processor '{processor_name}': {e}")
                     continue
 
-                # Create a config helper for the processor
-                # This allows processors to read their config with .get() method
-                section_name = f"gcode_preprocessor {processor_name}"
-                proc_config = ProcessorConfig(section_name, self.config)
-
-                # Instantiate the processor
-                processor_class = getattr(module, 'create_processor', None)
-                if processor_class:
-                    processor = processor_class(proc_config, logging)
+                factory = getattr(module, 'create_processor', None)
+                if factory:
+                    processor = factory(self._processor_config(processor_name), logging)
                     self.processors.append(processor)
                     logging.info(f"gcode_preprocessor: Loaded processor '{processor.get_name()}' (order: {index + 1})")
                 else:
@@ -135,12 +82,76 @@ class GcodePreprocessor:
 
             except Exception as e:
                 logging.error(f"gcode_preprocessor: Error loading processor '{processor_name}': {e}")
-                import traceback
                 logging.error(traceback.format_exc())
 
         # Processors are already in the correct order based on list position
-        # No need to sort
         logging.info(f"gcode_preprocessor: Loaded {len(self.processors)} processors")
+
+    def _build_context(self, file_path: str):
+        context = gcode_preprocessor_base.PreprocessorContext()
+        context.file_path = file_path
+        context.filename = os.path.basename(file_path)
+
+        # Get toolchanger if available
+        toolchanger = self.printer.lookup_object('toolchanger', None)
+        if toolchanger is not None and hasattr(toolchanger, 'get_status'):
+            try:
+                status = toolchanger.get_status(self.printer.get_reactor().monotonic())
+                context.toolchanger_config = dict(status)
+                context.tools = list(status.get('tool_numbers', []))
+            except Exception:
+                logging.exception("gcode_preprocessor: Could not read toolchanger status")
+        return context
+
+    def _run_pipeline(self, file_path: str, context) -> Dict[str, Any]:
+        try:
+            return gcode_preprocessor_base.run_pipeline(file_path, self.processors, context, logging)
+        except Exception as e:
+            logging.error(f"gcode_preprocessor: Error processing file: {e}")
+            logging.error(traceback.format_exc())
+            return {'success': False, 'processed': False, 'message': str(e)}
+
+    def _run_in_background(self, file_path: str, context) -> Dict[str, Any]:
+        """
+        Run the pipeline in a forked child process while the reactor keeps
+        running, so heaters and motion are not starved (same approach as
+        Klipper's shaper_calibrate).
+        """
+        mp = multiprocessing.get_context('fork')
+        parent_conn, child_conn = mp.Pipe()
+
+        def wrapper():
+            try:
+                import queuelogger
+                queuelogger.clear_bg_logging()
+            except Exception:
+                pass
+            try:
+                child_conn.send(self._run_pipeline(file_path, context))
+            except Exception:
+                child_conn.send({'success': False, 'processed': False,
+                                 'message': traceback.format_exc()})
+            child_conn.close()
+
+        proc = mp.Process(target=wrapper)
+        proc.daemon = True
+        proc.start()
+
+        reactor = self.printer.get_reactor()
+        eventtime = last_report_time = reactor.monotonic()
+        while proc.is_alive() and not parent_conn.poll():
+            if eventtime > last_report_time + 5.:
+                last_report_time = eventtime
+                self.gcode.respond_info("Preprocessing G-code file...", log=False)
+            eventtime = reactor.pause(eventtime + .1)
+
+        if parent_conn.poll():
+            result = parent_conn.recv()
+        else:
+            result = {'success': False, 'processed': False,
+                      'message': f'Preprocessing process exited with code {proc.exitcode}'}
+        proc.join(1.)
+        return result
 
     def process_file(self, file_path: str) -> Dict[str, Any]:
         """
@@ -158,112 +169,32 @@ class GcodePreprocessor:
         if not os.path.exists(file_path):
             return {'success': False, 'processed': False, 'message': f'File not found: {file_path}'}
 
-        # Check if file was already processed
-        if self._is_already_processed(file_path):
+        if gcode_preprocessor_base.PreprocessorUtilities.is_already_processed(file_path):
             return {'success': True, 'processed': False, 'message': 'File already preprocessed'}
 
-        # Create context
-        context = gcode_preprocessor_base.PreprocessorContext()
-        context.file_path = file_path
-        context.filename = os.path.basename(file_path)
+        return self._run_in_background(file_path, self._build_context(file_path))
 
-        # Get toolchanger if available
-        try:
-            toolchanger = self.printer.lookup_object('toolchanger')
-            if toolchanger:
-                status = toolchanger.get_status(self.printer.get_reactor().monotonic())
-                context.toolchanger_config = status
-                context.tools = status.get('tool_numbers', [])
-        except:
-            pass
-
-        try:
-            # Filter processors that can process this file
-            active_processors = [p for p in self.processors if p.can_process(file_path, context)]
-
-            if not active_processors:
-                return {'success': True, 'processed': False, 'message': 'No processors applicable'}
-
-            logging.info(f"gcode_preprocessor: Processing '{context.filename}' with {len(active_processors)} processors")
-
-            # Pass 1: Pre-processing (metadata gathering)
-            for processor in active_processors:
-                if not processor.pre_process(file_path, context):
-                    return {'success': False, 'processed': False,
-                           'message': f'Pre-processing failed in {processor.get_name()}'}
-
-            # Pass 2: Line-by-line processing
-            input_lines = gcode_preprocessor_base.PreprocessorUtilities.read_file_lines(file_path)
-            output_lines = []
-
-            # Add fingerprint
-            output_lines.append(gcode_preprocessor_base.PreprocessorUtilities.add_fingerprint(
-                context.get_metadata('slicer')))
-
-            context.total_lines = len(input_lines)
-
-            for line_num, line in enumerate(input_lines):
-                context.current_line = line_num
-
-                # Run line through all processors
-                processed_lines = [line]
-                for processor in active_processors:
-                    new_lines = []
-                    for proc_line in processed_lines:
-                        result = processor.process_line(proc_line, context)
-                        new_lines.extend(result)
-                    processed_lines = new_lines
-
-                output_lines.extend(processed_lines)
-
-            # Pass 3: Post-processing
-            for processor in active_processors:
-                if not processor.post_process(file_path, context):
-                    return {'success': False, 'processed': False,
-                           'message': f'Post-processing failed in {processor.get_name()}'}
-
-            # Write output to temp file, then atomically replace original
-            temp_path = file_path + '.preprocessing'
-            gcode_preprocessor_base.PreprocessorUtilities.write_file_lines(temp_path, output_lines)
-
-            # Atomic replacement
-            os.replace(temp_path, file_path)
-
-            logging.info(f"gcode_preprocessor: Successfully processed '{context.filename}'")
-
-            return {
-                'success': True,
-                'processed': True,
-                'message': f'Processed by {len(active_processors)} processors',
-                'processors': [p.get_name() for p in active_processors],
-                'metadata': context.metadata
-            }
-
-        except Exception as e:
-            logging.error(f"gcode_preprocessor: Error processing file: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return {'success': False, 'processed': False, 'message': str(e)}
-
-    def _is_already_processed(self, file_path: str) -> bool:
-        """Check if file was already processed by looking for fingerprint"""
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                first_line = f.readline()
-                return 'processed by klipper-gcode-preprocessor' in first_line
-        except:
+    def _is_printing(self) -> bool:
+        print_stats = self.printer.lookup_object('print_stats', None)
+        if print_stats is None:
             return False
+        state = print_stats.get_status(self.printer.get_reactor().monotonic()).get('state')
+        return state in ('printing', 'paused')
 
     cmd_PREPROCESS_GCODE_FILE_help = "Manually preprocess a G-code file"
     def cmd_PREPROCESS_GCODE_FILE(self, gcmd):
         """Command to manually trigger file preprocessing"""
-        file_path = gcmd.get('FILE')
+        file_path = gcmd.get('FILE', None)
 
         if not file_path:
-            gcmd.respond_info("Usage: PREPROCESS_GCODE_FILE FILE=<path>")
+            gcmd.respond_info("Usage: PREPROCESS_GCODE_FILE FILE=<path> [FORCE=1]")
             return
 
-        result = self.process_file(file_path)
+        if self._is_printing() and not gcmd.get_int('FORCE', 0):
+            raise gcmd.error("PREPROCESS_GCODE_FILE is not allowed while a print "
+                             "is running or paused (use FORCE=1 to override)")
+
+        result = self.process_file(os.path.expanduser(file_path))
 
         if result['success']:
             if result['processed']:
@@ -273,7 +204,7 @@ class GcodePreprocessor:
             else:
                 gcmd.respond_info(f"File not processed: {result['message']}")
         else:
-            gcmd.respond_info(f"Error preprocessing file: {result['message']}")
+            raise gcmd.error(f"Error preprocessing file: {result['message']}")
 
     cmd_LIST_GCODE_PROCESSORS_help = "List available G-code processors"
     def cmd_LIST_GCODE_PROCESSORS(self, gcmd):
@@ -282,10 +213,11 @@ class GcodePreprocessor:
             gcmd.respond_info("No processors loaded")
             return
 
-        gcmd.respond_info(f"Loaded {len(self.processors)} processors:")
+        lines = [f"Loaded {len(self.processors)} processors:"]
         for i, proc in enumerate(self.processors, 1):
-            gcmd.respond_info(f"  {i}. {proc.get_name()}")
-            gcmd.respond_info(f"     {proc.get_description()}")
+            lines.append(f"  {i}. {proc.get_name()}")
+            lines.append(f"     {proc.get_description()}")
+        gcmd.respond_info("\n".join(lines))
 
     def get_status(self, eventtime):
         """Return status for queries"""
@@ -306,24 +238,4 @@ def load_config(config):
 
 def load_config_prefix(config):
     """Allow [gcode_preprocessor ...] config sections to be defined"""
-    # This function registers the config sections so Klipper doesn't complain
-    # We need to explicitly read all possible options that processors might use
-
-    # Common options across all processors
-    config.get('exclude_tools', '')
-
-    # idle_tool_shutdown options
-    config.getfloat('idle_timeout_minutes', 0)
-    config.getfloat('initial_feedrate', 3000.0)
-
-    # token_replacer options
-    config.getboolean('extract_tools', True)
-    config.getboolean('extract_colors', True)
-    config.getboolean('extract_materials', True)
-    config.getboolean('extract_temperatures', True)
-    config.getboolean('extract_purge_volumes', False)
-    config.getboolean('extract_filament_names', False)
-    config.getboolean('replace_placeholders', True)
-
-    # Return a dummy object that Klipper can register
     return PreprocessorConfigSection(config)

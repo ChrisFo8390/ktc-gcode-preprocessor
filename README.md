@@ -1,26 +1,101 @@
-# Klipper G-code Preprocessor
+# KTC G-code Preprocessor
 
 A powerful, extensible G-code preprocessing system for Klipper that automatically optimizes and enhances G-code files for multi-tool 3D printing.
+
+Repository: <https://github.com/ChrisFo8390/ktc-gcode-preprocessor>
+(fork of [jwellman80/klipper-gcode-preprocessor](https://github.com/jwellman80/klipper-gcode-preprocessor))
 
 ## Installation
 
 ```bash
 cd ~
-git clone https://github.com/jwellman80/klipper-gcode-preprocessor.git
-cd klipper-gcode-preprocessor
+git clone https://github.com/ChrisFo8390/ktc-gcode-preprocessor.git
+cd ktc-gcode-preprocessor
 ./install.sh
 ```
+
+`install.sh` installs from the directory it is started in, so the clone can live
+anywhere. It
+
+- links `gcode_preprocessor.py`, `gcode_preprocessor_base.py` and the
+  `preprocessors/` directory into `~/klipper/klippy/extras/`,
+- copies `config/gcode-preprocessor.cfg` to
+  `~/printer_data/config/gcode-preprocessor/preprocessor.cfg` (only if it does not exist yet),
+- optionally links the Moonraker component and adds `[gcode_preprocessor]` and
+  `[update_manager ktc-gcode-preprocessor]` to `moonraker.conf` (a backup
+  `moonraker.conf.bak.<timestamp>` is written first; existing sections are not changed).
+
+Different locations can be set with environment variables, e.g.
+`KLIPPER_PATH=~/klipper CONFIG_PATH=~/printer_data/config ./install.sh`.
 
 Add to `printer.cfg`
 ```ini
 [include gcode-preprocessor/preprocessor.cfg]
 ```
 
-Add to `moonraker.conf`:
+### Updates
+
+With the `[update_manager ktc-gcode-preprocessor]` section the preprocessor appears
+in Mainsail/Fluidd's update manager and is updated from this repository; Klipper
+and Moonraker are restarted afterwards. Section written by `install.sh`:
+```ini
+[update_manager ktc-gcode-preprocessor]
+type: git_repo
+path: ~/ktc-gcode-preprocessor
+origin: https://github.com/ChrisFo8390/ktc-gcode-preprocessor.git
+primary_branch: main
+managed_services: klipper moonraker
+```
+Without the update manager: `cd ~/ktc-gcode-preprocessor && git pull`, then
+restart Klipper and Moonraker. Re-running `install.sh` is only needed if a
+release note says so.
+
+### Switching from jwellman80/klipper-gcode-preprocessor
+
+Run `install.sh` from this repository; it replaces the existing links in
+`~/klipper/klippy/extras/` and `~/moonraker/moonraker/components/` and keeps your
+`preprocessor.cfg`. Then remove an `[update_manager]` section that points to the
+old repository from `moonraker.conf`, restart Klipper and Moonraker and delete the
+old clone (`~/klipper-gcode-preprocessor`).
+
+### Moonraker options
+
+`moonraker.conf`:
 ```ini
 [gcode_preprocessor]
 enable_preprocessing: True
+# Optional:
+# config_path: ~/printer_data/config/gcode-preprocessor/preprocessor.cfg
+# timeout: 600        # seconds, used with Moonraker's GCode processor API
+# console_messages: True
+# message_start: KTC preprocessing active
+# message_success: preprocessing successful
+# message_failed: !! KTC preprocessing failed - see moonraker.log
 ```
+
+**Console messages:** When a file is uploaded while no print is running or paused,
+the Mainsail/Fluidd console shows `message_start` when preprocessing begins and
+`message_success` (or `message_failed`) when it has finished. Nothing is shown
+during a print, for files that are already preprocessed or when preprocessing is
+disabled. The messages are sent by Moonraker itself (like a Klipper console
+response), Klipper is not involved. This uses Moonraker's internal
+`_run_extract_metadata`; if a future Moonraker version removes it, preprocessing
+keeps working without the messages (a warning is logged).
+
+On Moonraker versions that provide the GCode processor API
+(`MetadataStorage.register_gcode_processor`) the preprocessor registers itself
+there and runs with its own `timeout`. On older versions it falls back to
+replacing Moonraker's metadata script; the preprocessing then has to finish
+within Moonraker's metadata timeout (20 s by default). For large multi-tool
+files raise it in `moonraker.conf`:
+```ini
+[file_manager]
+default_metadata_parser_timeout: 300
+```
+
+The Moonraker script only reads `preprocessor.cfg` (or `config_path`), not
+`printer.cfg`. Keep all `[gcode_preprocessor ...]` sections in that file so
+Klipper and Moonraker use the same settings.
 
 Restart Moonraker and Klipper:
 ```bash
@@ -128,6 +203,8 @@ Files uploaded via Mainsail/Fluidd are automatically preprocessed (requires Moon
 ```gcode
 PREPROCESS_GCODE_FILE FILE=/path/to/file.gcode
 ```
+Runs in a background process so Klipper keeps serving heaters and motion.
+Refused while a print is running or paused unless `FORCE=1` is given.
 
 ### List Processors
 ```gcode
@@ -150,7 +227,26 @@ exclude_tools:               # Comma-separated list to exclude (e.g., "0,1")
 
 # Time estimation (only used if idle_timeout_minutes > 0)
 initial_feedrate: 3000       # Initial feedrate in mm/min for time calculations
+
+# Optional tool -> heater mapping (see below)
+tool_heaters:                # e.g. "0=extruder, 1=extruder1, 2=extruder2"
 ```
+
+**Which heater is switched off:** Without `tool_heaters`, the shutdown command
+is `M104 T{n} S0`. Klipper resolves `T{n}` to the heater `extruder` (n=0) or
+`extruder{n}`, and silently ignores `S0` for a heater that does not exist. If the
+tool numbers in your G-code are not identical to the extruder index (e.g. AFC
+lanes or a toolchanger with custom extruder names), set `tool_heaters` so the
+preprocessor emits `SET_HEATER_TEMPERATURE HEATER=<name> TARGET=0` instead.
+
+**Reheating:** The preprocessor never inserts heat-up commands. A tool that was
+shut down must be reheated (and waited for) by your tool change macro or the
+slicer before it prints again.
+
+**Time estimation:** Distance / feedrate of G0-G3 moves (absolute and relative
+positioning, arcs, G92) plus G4 dwells. Acceleration is ignored, so the estimate
+is lower than the real print time; predictive shutdowns are therefore
+conservative.
 
 **How it works:**
 - **End-of-use** is always active - tools are shut down after their final usage
@@ -165,18 +261,36 @@ extract_colors: True
 extract_materials: True
 extract_temperatures: True
 replace_placeholders: True
+extract_slicer_config: True     # enables !!key!! placeholders
+sanitize_generic_values: True   # ';' -> ',' and '#' removed in !!key!! values
 ```
+
+Klipper cuts a command at `;` and treats `#` as a comment in extended commands.
+Multi-value slicer settings such as `filament_type = PLA;PETG` or
+`filament_colour = #FF0000;#00FF00` would therefore silently truncate the line.
+With `sanitize_generic_values` (default) they are inserted as `PLA,PETG` and
+`FF0000,00FF00`. Values with spaces need quotes in the macro call, e.g.
+`BED_TYPE="!!curr_bed_type!!"`.
 
 ## Writing Custom Processors
 
-Create a new file in `~/klipper/klippy/extras/preprocessors/my_processor.py`:
+Create a new file in `klipper/extras/preprocessors/my_processor.py` of this
+repository. The `preprocessors/` directory is linked as a whole, so the new
+file is available to Klipper and Moonraker after a restart:
 
 ```python
-from gcode_preprocessor_base import (
-    GcodePreprocessorPlugin,
-    PreprocessorContext,
-    GcodePatterns
-)
+try:
+    from ..gcode_preprocessor_base import (   # loaded by Klipper
+        GcodePreprocessorPlugin,
+        PreprocessorContext,
+        GcodePatterns
+    )
+except ImportError:
+    from gcode_preprocessor_base import (     # loaded by the Moonraker script
+        GcodePreprocessorPlugin,
+        PreprocessorContext,
+        GcodePatterns
+    )
 
 class MyProcessor(GcodePreprocessorPlugin):
     def __init__(self, config, logger):
@@ -190,6 +304,7 @@ class MyProcessor(GcodePreprocessorPlugin):
 
     def pre_process(self, file_path, context):
         # First pass - gather metadata
+        # The instance is reused for every file: reset per-file state here
         return True
 
     def process_line(self, line, context):
@@ -210,8 +325,12 @@ Then add to your config:
 processors: token_replacer, idle_tool_shutdown, my_processor
 
 [gcode_preprocessor my_processor]
-# Custom settings
+# Custom settings (any option name is accepted)
+my_option: 42
 ```
+
+Read options with `config.get()`, `config.getboolean()`, `config.getint()` or
+`config.getfloat()`.
 
 ## Architecture
 
@@ -239,7 +358,7 @@ File Upload → Moonraker → Klipper Preprocessor
 
 ### Directory Structure
 ```
-klipper-gcode-preprocessor/
+ktc-gcode-preprocessor/
 ├── install.sh                          # Installation script
 ├── README.md                           # This file
 ├── klipper/extras/
@@ -254,10 +373,10 @@ klipper-gcode-preprocessor/
 │   └── gcode_preprocessor.py          # Moonraker component
 ├── config/
 │   └── gcode-preprocessor.cfg         # Default configuration
-├── docs/
-│   └── README.md                       # Detailed documentation
-└── examples/
-    └── test_sample.gcode               # Test file
+├── examples/
+│   └── test_sample.gcode               # Test file
+└── tests/
+    └── test_preprocessor.py            # Unit tests (python3 -m unittest discover -s tests)
 ```
 
 ## Troubleshooting
@@ -270,14 +389,19 @@ klipper-gcode-preprocessor/
 ### Files Already Preprocessed
 Files are only preprocessed once. First line will contain:
 ```gcode
-; processed by klipper-gcode-preprocessor
+; processed by ktc-gcode preprocessor (slicer: OrcaSlicer)
 ```
+
+The `(slicer: ...)` suffix is only added when `token_replacer` detected the
+slicer. Files marked by older versions (`; processed by klipper-gcode-preprocessor`)
+are recognized as well and not processed again.
 
 To reprocess, delete this line or re-upload the file.
 
 ### Tool Not Shutting Down
 - Check `exclude_tools` setting (empty by default - all tools shut down)
-- For end-of-use: Verify tool is used multiple times (needs "last usage")
+- Check that `M104 T{n}` reaches the right heater, otherwise set `tool_heaters`
+- For end-of-use: the tool must be switched away from after its last usage
 - For predictive idle: Ensure `idle_timeout_minutes` is set and tool is idle long enough
 - Check logs for `idle_tool_shutdown` messages
 
@@ -287,15 +411,17 @@ To reprocess, delete this line or re-upload the file.
 
 ## Examples
 
-See `docs/README.md` for comprehensive examples and use cases.
+See `examples/test_sample.gcode` and the tests in `tests/`.
 
 ## Contributing
 
-Contributions welcome! Please submit pull requests or open issues on GitHub.
+Contributions welcome! Please submit pull requests or open issues at
+<https://github.com/ChrisFo8390/ktc-gcode-preprocessor>.
 
 ## Credits
 
-Inspired by the Happy Hare MMU preprocessor by moggieuk.
+Based on [klipper-gcode-preprocessor](https://github.com/jwellman80/klipper-gcode-preprocessor)
+by Jared Wellman. Inspired by the Happy Hare MMU preprocessor by moggieuk.
 
 ## License
 
@@ -303,6 +429,5 @@ GNU GPLv3
 
 ## Support
 
-- Documentation: `docs/README.md`
 - Issues: GitHub Issues
 - Discussions: GitHub Discussions
