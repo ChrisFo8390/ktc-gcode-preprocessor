@@ -96,6 +96,12 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
    - Set `idle_timeout_minutes: 5` to enable predictive mode (0 = disabled)
    - See `klipper/extras/preprocessors/idle_tool_shutdown.py`
 
+3. **tool_summary**
+   - Inserts `_KTC_TOOL_SUMMARY TOOLS=.. TEMPS=.. FIRST_TEMPS=.. COLORS=..` before the first `PRINT_START`/`START_PRINT` (option `print_start_macros`)
+   - Uses context metadata from `token_replacer` (must be listed before it)
+   - Macro in `config/tool-summary.cfg` (linked by install.sh) prints via `action_respond_info` with HTML colors; `#`, `;` and the degree sign are built with Jinja escapes because Klipper strips `#` comments from config files
+   - See `klipper/extras/preprocessors/tool_summary.py`
+
 ### Key Patterns
 
 **Tool Change Detection:**

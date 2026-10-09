@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognized as already processed
 
 ### Added
+- tool_summary processor + `_KTC_TOOL_SUMMARY` macro (`config/tool-summary.cfg`): console
+  summary of used tools, temperatures and filament colors (colored) before PRINT_START
 - install.sh installs from the repository it is run from (default clone
   `https://github.com/ChrisFo8390/ktc-gcode-preprocessor.git` to `~/ktc-gcode-preprocessor`),
   links `preprocessors/` as a directory, adds `[gcode_preprocessor]` and

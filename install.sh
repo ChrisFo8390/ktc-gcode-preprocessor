@@ -104,6 +104,15 @@ function install_config {
         echo "[INFO] Review ${INSTALL_PATH}/config/gcode-preprocessor.cfg for any new settings"
     fi
 
+    # Macros shipped with the repository are linked, so updates reach them
+    ln -sfn "${INSTALL_PATH}"/config/tool-summary.cfg "${CONFIG_PATH}"/gcode-preprocessor/tool-summary.cfg
+    echo "[INSTALL] Linked tool-summary.cfg to ${CONFIG_PATH}/gcode-preprocessor/"
+    if ! grep -qE '^\[include tool-summary\.cfg\]' "${CONFIG_PATH}/gcode-preprocessor/preprocessor.cfg"; then
+        echo "[INFO] To use the tool summary, add to ${CONFIG_PATH}/gcode-preprocessor/preprocessor.cfg:"
+        echo "    [include tool-summary.cfg]"
+        echo "    and tool_summary to 'processors' in [gcode_preprocessor]"
+    fi
+
     echo ""
     echo "[INFO] Add the following line to your printer.cfg to enable the preprocessor:"
     echo ""

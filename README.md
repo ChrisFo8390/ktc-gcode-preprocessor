@@ -32,6 +32,7 @@ Add to `printer.cfg`
 ```ini
 [include gcode-preprocessor/preprocessor.cfg]
 ```
+(`preprocessor.cfg` itself includes `tool-summary.cfg` from the same directory.)
 
 ### Updates
 
@@ -192,6 +193,45 @@ PRINT_START BED_TYPE="Textured PEI Plate"
 gcode:
     M118 Print uses !tool_count! tools
     M118 Colors: !colors!
+```
+
+### 📋 **Tool Summary**
+Inserts a call to the `_KTC_TOOL_SUMMARY` macro right before `PRINT_START`
+(or `START_PRINT`). When the print starts, the console lists every tool used by
+the print with its nozzle temperature (and first layer temperature if different)
+and the filament color as a colored swatch plus the hex code in that color:
+
+```
+KTC tool summary: 2 tool(s)
+T0: 220 °C (first layer 225 °C)   ■ #FF0000
+T2: 250 °C   ■ #00AEEF
+```
+
+Inserted line (example):
+```gcode
+_KTC_TOOL_SUMMARY TOOLS=0,2 TEMPS=220,250 FIRST_TEMPS=225,250 COLORS=FF0000,00AEEF
+PRINT_START ...
+```
+
+- Needs `token_replacer` listed **before** `tool_summary` in `processors`.
+- The macro lives in `config/tool-summary.cfg`; `install.sh` links it to
+  `~/printer_data/config/gcode-preprocessor/tool-summary.cfg` and the default
+  `preprocessor.cfg` includes it with `[include tool-summary.cfg]`. Existing
+  installations have to add that line and `tool_summary` to `processors`.
+- It uses `action_respond_info`, so no `[respond]` section is needed.
+- Colors are HTML (`<span style=...>`) rendered by Mainsail and Fluidd (both
+  sanitize with DOMPurify, which keeps `style`). KlipperScreen and `klippy.log`
+  show the raw HTML.
+- Temperatures and colors are taken per tool number from the slicer settings
+  (`nozzle_temperature`/`temperature`, `nozzle_temperature_initial_layer`/
+  `first_layer_temperature`, `filament_colour`/`extruder_colour`).
+- If the macro is missing, Klipper only reports `Unknown command` and the print
+  continues.
+
+```ini
+[gcode_preprocessor tool_summary]
+print_start_macros: PRINT_START, START_PRINT
+summary_macro: _KTC_TOOL_SUMMARY
 ```
 
 ## Usage
@@ -368,11 +408,13 @@ ktc-gcode-preprocessor/
 │       ├── __init__.py
 │       ├── token_replacer.py          # Extract metadata & replace tokens
 │       ├── idle_tool_shutdown.py      # Intelligent tool shutdown (predictive + end-of-use)
+│       ├── tool_summary.py            # Console summary before PRINT_START
 │       └── example_template.py        # Example processor template
 ├── moonraker/
 │   └── gcode_preprocessor.py          # Moonraker component
 ├── config/
-│   └── gcode-preprocessor.cfg         # Default configuration
+│   ├── gcode-preprocessor.cfg         # Default configuration
+│   └── tool-summary.cfg               # _KTC_TOOL_SUMMARY macro
 ├── examples/
 │   └── test_sample.gcode               # Test file
 └── tests/
