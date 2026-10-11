@@ -8,11 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- heat_wait_stats processor: marks tool changes with `_KTC_HEAT_MARK`; Klipper measures
-  heating rate, mechanical tool change time and the time spent waiting for the nozzle
-  temperature per tool, stores the samples in `gcode-preprocessor/heat_stats.json` and
-  reports them with suggestions for standby temperature and preheat time at the end of
-  the print and via `KTC_HEAT_STATS`
+- heat_stats processor + Klipper runtime: measures per tool how long the printer stands
+  still waiting for the nozzle temperature at tool changes (from the slicer preheat
+  `; preheat Tn time: Ns` to the heat wait after the change, including the tool change
+  macro) and prints wait per tool, heat rate, preheats undone by a slicer cooldown and a
+  suggested `preheat_time` / `standby_temperature_delta` / `idle_temperature` at the end
+  of the print; command `KTC_HEAT_STATS [RESET=1]`, history in
+  `~/printer_data/logs/ktc_heat_stats.jsonl`
 
 ## [1.1.0] - 2026-10-09
 

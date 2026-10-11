@@ -65,7 +65,7 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
 **Klipper Integration:**
 - Lives in `klipper/extras/` (symlinked to `~/klipper/klippy/extras/`)
 - Loaded as Klipper module via `load_config()` function
-- Registers G-code commands: `PREPROCESS_GCODE_FILE`, `LIST_GCODE_PROCESSORS`
+- Registers G-code commands: `PREPROCESS_GCODE_FILE`, `LIST_GCODE_PROCESSORS` (heat_stats adds `KTC_HEAT_STATS` and `_KTC_HEAT_MARK`)
 - Processors live in `klipper/extras/preprocessors/` subdirectory
 
 **Moonraker Integration (Optional):**
@@ -102,11 +102,12 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
    - Macro in `config/tool-summary.cfg` (linked by install.sh) prints via `action_respond_info` with HTML colors; `#`, `;` and the degree sign are built with Jinja escapes because Klipper strips `#` comments from config files
    - See `klipper/extras/preprocessors/tool_summary.py`
 
-4. **heat_wait_stats**
-   - Inserts `_KTC_HEAT_MARK EVENT=START|PREHEAT|CHANGE|READY|END` around every change to another tool
-   - The same module holds `HeatWaitRecorder` (registered by the Klipper module: `_KTC_HEAT_MARK`, `KTC_HEAT_STATS`) and the plain analysis functions (`analyze()`, `format_report()`)
-   - Waiting time = change duration minus the mechanical change time (median of changes where the nozzle was already hot); samples persisted in `gcode-preprocessor/heat_stats.json`
-   - See `klipper/extras/preprocessors/heat_wait_stats.py`
+4. **heat_stats**
+   - Processor inserts `_KTC_HEAT_MARK EVENT=RESET|PREHEAT|BEGIN|END|REPORT` lines (PREHEAT before `M104 .. ; preheat Tn time: Ns`, BEGIN before a tool change after the first extruding move, END after the last heat wait before the next motion, REPORT after the last line); inserts only when the line equals the stored original, so other processors may change neighbouring lines
+   - `HeatStatsRuntime` (same file) is the Klipper part: `load_config_prefix` returns it for `[gcode_preprocessor heat_stats]`, `GcodePreprocessor.__init__` adds it when `heat_stats` is listed without a section; registers `_KTC_HEAT_MARK` and `KTC_HEAT_STATS`
+   - Wait = toolhead standstill (`toolhead.check_busy()` lookahead empty and est_print_time > print_time, or print_time equal to the last `toolhead:sync_print_time`) while the heater is off target or `heater.check_busy()`
+   - Pure `summarize()`/`format_report()` compute the suggestions (testable without Klipper)
+   - See `klipper/extras/preprocessors/heat_stats.py`
 
 ### Key Patterns
 

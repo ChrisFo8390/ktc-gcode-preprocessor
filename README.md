@@ -148,38 +148,52 @@ print_start_macros: PRINT_START, START_PRINT
 summary_macro: _KTC_TOOL_SUMMARY
 ```
 
-### heat_wait_stats
-Measures how long each tool change waits for the nozzle temperature and suggests a
-standby temperature and a preheat time. The processor marks every change to another
-tool with `_KTC_HEAT_MARK` (after the slicer's `M104 T<n>` preheat, before the `T<n>`,
-after the following `M109`); Klipper measures with these marks:
+### heat_stats
+Measures per tool how long the printer stands still at tool changes because the nozzle
+is not at temperature yet, and suggests slicer values at the end of the print.
 
-- heating rate of each tool (from the preheat until the target is reached),
-- duration of a tool change that did not wait (the mechanical change time),
-- waiting time = change duration minus mechanical change time, if the nozzle was not hot yet.
+- The processor marks the file with `_KTC_HEAT_MARK` lines: `PREHEAT` before the slicer
+  preheat (`M104 S.. Tn ; preheat Tn time: 15s` from PrusaSlicer BOSS ooze prevention),
+  `BEGIN` before each tool change, `END` after the heat wait that follows it
+  (`M109`/`M116`/`TEMPERATURE_WAIT`), `RESET` at the start and `REPORT` at the end.
+- Klipper samples the tool's heater and the toolhead every `sample_interval`. Heat wait
+  is the time the toolhead stands still while the nozzle is more than `temp_tolerance`
+  off target or the heater is still settling (the condition `M109` waits on). Waits in
+  your tool change macro (e.g. the pickup `M109` at the dock) are included.
+- A preheat that the slicer undoes with a later cooldown `M104` of the same tool is
+  counted (`preheats undone by cooldown`) and not used for the suggestions.
 
-Samples are kept per tool in `gcode-preprocessor/heat_stats.json` next to `printer.cfg`
-(last 500 per tool). At the end of the print the report appears in the console:
-
+Report at the end of the print, or any time with `KTC_HEAT_STATS` (example output):
 ```
-KTC heat stats (print 2026-10-11 14:02:11): 639 tool changes, waiting for temperature 2h 41m
-Tool change without waiting: 7.9s
-T1: 207 changes, waited 205x - avg 21.4s, max 27.0s, total 1h 13m
-    heats 3.6C/s, from 125C to 225C, slicer preheat 1.2s before the change
-    suggestion: preheat 25s before the tool change, or with the current preheat a standby of 200C (delta -25C)
+KTC heat stats: 639 tool changes, heat wait 1h 23m (avg 7.8 s)
+T1: 207 changes | wait avg 8.1 s, p90 12.8 s, max 14.0 s, total 27m 57s | heat rate 3.0 °C/s | preheats undone by cooldown: 48
+Suggestion (slicer preheat time now 15 s, real/slicer time 1.00):
+  A) preheat_time: 31 s (keep standby temperature)
+  B) standby_temperature_delta: -50 °C (keep preheat_time 15 s); per filament idle_temperature: T1 175 °C
 ```
-
-Standby suggestion → PrusaSlicer `standby_temperature_delta` (Ooze prevention).
-Preheat suggestion → how early the next tool would have to be heated (OrcaSlicer
-`preheat_time`; PrusaSlicer has no such option).
+- **A)** preheat time that covers the 90th percentile wait plus `margin` (max. 120 s). If
+  tools were hot long before their change, a shorter time is suggested.
+- **B)** how far a parked tool may cool down and still reach temperature in the time it
+  had (median): measured heat rate × `safety_factor` × time, rounded down to 5 °C.
+- With several tools the longest preheat and the smallest standby drop are suggested.
+  Use A or B, not both. Each report is appended to `history_file` (JSON lines).
 
 ```ini
-[gcode_preprocessor heat_wait_stats]
-tool_heaters:        # e.g. 0=extruder, 1=extruder1 (default: [tool Tn] extruder, else extruder<n>)
-report_at_end: True  # print the report when the print ends
-stats_file:          # default ~/printer_data/config/gcode-preprocessor/heat_stats.json
-max_samples: 500     # per tool
+[gcode_preprocessor heat_stats]
+insert_report: True          # REPORT marker at the end of the file
+sample_interval: 0.2         # s
+temp_tolerance: 1            # °C
+margin: 3                    # s added to the suggested preheat time
+safety_factor: 0.9           # applied to the measured heat rate
+track_timeout: 900           # s until a preheated tool that is never selected is dropped
+history_file: ~/printer_data/logs/ktc_heat_stats.jsonl
+tool_heaters:                # e.g. 0=extruder, 1=extruder1
 ```
+The section is optional. Heater per tool: `tool_heaters`, else the `extruder` of
+klipper-toolchanger's `[tool Tn]`, else `extruder`/`extruder{n}`. Klipper registers
+`_KTC_HEAT_MARK` only while `heat_stats` is in `processors`; files processed with it
+need it (or a re-upload without it). Marker times are taken when Klipper reads the line,
+so the measured preheat lead can be off by the move buffer (up to about 2 s).
 
 ## Commands
 
@@ -187,7 +201,7 @@ max_samples: 500     # per tool
 |---|---|
 | `LIST_GCODE_PROCESSORS` | loaded processors with their descriptions |
 | `PREPROCESS_GCODE_FILE FILE=<path>` | preprocess a file manually (background process; refused during a print unless `FORCE=1`) |
-| `KTC_HEAT_STATS [SCOPE=PRINT\|ALL] [TOOL=<n>] [RESET=1]` | heat wait report of the last print or of all recorded prints; `RESET=1` clears the samples |
+| `KTC_HEAT_STATS [RESET=1]` | heat wait per tool and suggested preheat/standby for the current or last print (heat_stats) |
 
 Processed files start with `; processed by ktc-gcode preprocessor (slicer: <name>)` and
 are not processed again (the old `klipper-gcode-preprocessor` marker is recognized too).

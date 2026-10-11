@@ -5,7 +5,6 @@
 #   python3 -m unittest discover -s tests -v
 
 import importlib
-import json
 import logging
 import os
 import shutil
@@ -37,11 +36,6 @@ def idle(**values):
 def tokens(**values):
     module = importlib.import_module('preprocessors.token_replacer')
     return module.create_processor(ProcessorConfig('tokens', values, LOG), LOG)
-
-
-def heat(**values):
-    module = importlib.import_module('preprocessors.heat_wait_stats')
-    return module.create_processor(ProcessorConfig('heat', values, LOG), LOG)
 
 
 class PipelineTestCase(unittest.TestCase):
@@ -394,17 +388,8 @@ class FakeConfig:
 
 
 class FakeReactor:
-    NOW = 0.
-    NEVER = float('inf')
-
     def monotonic(self):
         return time.monotonic()
-
-    def register_timer(self, callback, waketime=NEVER):
-        return callback
-
-    def update_timer(self, timer, waketime):
-        pass
 
     def pause(self, waketime):
         time.sleep(max(0., waketime - time.monotonic()))
@@ -436,143 +421,6 @@ class FakePrinter:
 
     def get_reactor(self):
         return self.reactor
-
-
-# Excerpt of a PrusaSlicer tool change (ooze prevention, no wipe tower)
-PRUSA_TOOLCHANGE = """M83
-T0 ; change tool
-G1 X10 Y10 E1
-G1 E-14.7 F2100
-M104 S125 T0 ; set temperature ;cooldown
-M104 S225 T1 ; set new tool temperature so it can start heating while changing
-T1 ; change tool
-M107
-M109 S225 T1 ; set temperature and wait for it to be reached
-G1 X182.3 Y159.9 F54000
-G1 E15 F2100
-G1 X20 Y20 E1
-T1 ; change tool
-G1 X21 Y20 E1
-T0 ; change tool
-G1 X22 Y20 E1
-PRINT_END
-"""
-
-
-class TestHeatWaitStats(PipelineTestCase):
-    def test_markers_around_tool_change(self):
-        out = self.process([idle(), heat()], PRUSA_TOOLCHANGE)
-        self.assertEqual(out[1], '_KTC_HEAT_MARK EVENT=START')
-        preheat = out.index('M104 S225 T1 ; set new tool temperature so it can start heating while changing')
-        self.assertEqual(out[preheat + 1], '_KTC_HEAT_MARK EVENT=PREHEAT TOOL=1')
-        change = out.index('_KTC_HEAT_MARK EVENT=CHANGE TOOL=1')
-        self.assertEqual(out[change + 1], 'T1 ; change tool')
-        wait = out.index('M109 S225 T1 ; set temperature and wait for it to be reached')
-        self.assertEqual(out[wait + 1], '_KTC_HEAT_MARK EVENT=READY TOOL=1')
-        # Re-selecting T1 is no tool change, T0 without slicer preheat and M109
-        # gets READY before the first move
-        self.assertEqual(out.count('_KTC_HEAT_MARK EVENT=CHANGE TOOL=1'), 1)
-        self.assertNotIn('_KTC_HEAT_MARK EVENT=PREHEAT TOOL=0', out)
-        change0 = out.index('_KTC_HEAT_MARK EVENT=CHANGE TOOL=0')
-        self.assertEqual(out[change0 + 1], 'T0 ; change tool')
-        ready0 = out.index('_KTC_HEAT_MARK EVENT=READY TOOL=0')
-        self.assertGreater(ready0, change0)
-        self.assertEqual(out[ready0 + 1], 'G1 X22 Y20 E1')
-        self.assertEqual(out[-2:], ['PRINT_END', '_KTC_HEAT_MARK EVENT=END'])
-
-    def test_end_marker_without_trailing_newline(self):
-        out = self.process([heat()], "T0\nT1\nG1 X1")
-        self.assertEqual(out[-2:], ['G1 X1', '_KTC_HEAT_MARK EVENT=END'])
-
-    def test_analysis_and_suggestions(self):
-        module = importlib.import_module('preprocessors.heat_wait_stats')
-        hot = {'tool': 0, 'target': 225, 'start_temp': 220, 'lead': 1.0, 'change_time': 8.0,
-               'heat_time': 1.0, 'reached_after': -1.0}
-        # Heated 100C in 25s (4C/s), change took 25s - 8s mechanical = 17s wait
-        cold = {'tool': 1, 'target': 225, 'start_temp': 125, 'lead': 1.0, 'change_time': 25.0,
-                'heat_time': 25.0, 'reached_after': 24.0}
-        result = module.analyze([hot, hot, cold, cold])
-        self.assertEqual(result['mechanical'], 8.0)
-        t1 = result['tools'][1]
-        self.assertAlmostEqual(t1['wait_avg'], 17.0)
-        self.assertAlmostEqual(t1['rate'], 4.0)
-        # 100C at 4C/s * 0.85 = 29.4s, minus 8s mechanical -> 25s before the change
-        self.assertEqual(t1['preheat_suggestion'], 25)
-        # (1s lead + 8s) * 3.4C/s = 30.6C -> standby 225 - 30 = 195C
-        self.assertEqual(t1['standby_suggestion'], 195)
-        self.assertEqual(result['tools'][0]['wait_total'], 0)
-        report = module.format_report(result, 'test')
-        self.assertIn('T1: 2 changes, waited 2x', report)
-        self.assertIn('standby of 195C', report)
-
-
-class FakeHeater:
-    def __init__(self, temp, target):
-        self.temp, self.target = temp, target
-
-    def get_temp(self, eventtime):
-        return self.temp, self.target
-
-
-class FakeHeaters:
-    def __init__(self, heaters):
-        self.heaters = heaters
-
-    def lookup_heater(self, name):
-        return self.heaters[name]
-
-
-class FakeGcmd:
-    def __init__(self, **params):
-        self.params = {k.upper(): str(v) for k, v in params.items()}
-        self.responses = []
-
-    def get(self, name, default=None):
-        return self.params.get(name, default)
-
-    def get_int(self, name, default=None):
-        value = self.params.get(name)
-        return default if value is None else int(value)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class TestHeatWaitRecorder(PipelineTestCase):
-    def test_records_wait_for_temperature(self):
-        module = importlib.import_module('preprocessors.heat_wait_stats')
-        printer = FakePrinter()
-        clock = [100.0]
-        printer.reactor.monotonic = lambda: clock[0]
-        heater = FakeHeater(125., 225.)
-        printer.objects['heaters'] = FakeHeaters({'extruder1': heater})
-        recorder = module.HeatWaitRecorder(printer, printer.lookup_object('gcode'))
-        stats_file = os.path.join(self.tmpdir, 'stats', 'heat_stats.json')
-        recorder.configure({'stats_file': stats_file, 'report_at_end': 'False'}, None)
-
-        def mark(event, tool=None, at=None):
-            clock[0] = at
-            params = {'EVENT': event} if tool is None else {'EVENT': event, 'TOOL': tool}
-            recorder.cmd_KTC_HEAT_MARK(FakeGcmd(**params))
-
-        mark('START', at=100.)
-        mark('PREHEAT', 1, at=100.)
-        mark('CHANGE', 1, at=101.)
-        heater.temp = 225.
-        recorder._poll(126.)  # target reached 26s after the preheat
-        mark('READY', 1, at=126.)
-        mark('END', at=200.)
-
-        self.assertEqual(len(recorder.samples), 1)
-        sample = recorder.samples[0]
-        self.assertEqual((sample['tool'], sample['lead'], sample['change_time'], sample['heat_time']),
-                         (1, 1.0, 25.0, 26.0))
-        with open(stats_file) as f:
-            self.assertEqual(len(json.load(f)['samples']), 1)
-
-        gcmd = FakeGcmd()
-        recorder.cmd_KTC_HEAT_STATS(gcmd)
-        self.assertIn('T1: 1 changes', gcmd.responses[0])
 
 
 @unittest.skipUnless(hasattr(os, 'fork'), "requires fork")
