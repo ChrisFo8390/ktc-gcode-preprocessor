@@ -7,6 +7,7 @@ import multiprocessing
 import traceback
 from typing import Dict, List, Optional, Any
 from . import gcode_preprocessor_base
+from .preprocessors import heat_wait_stats
 
 
 class PreprocessorConfigSection:
@@ -49,11 +50,27 @@ class GcodePreprocessor:
                                     self.cmd_LIST_GCODE_PROCESSORS,
                                     desc=self.cmd_LIST_GCODE_PROCESSORS_help)
 
+        # Measures the waiting time for nozzle temperature at the tool changes
+        # marked by the heat_wait_stats processor (KTC_HEAT_STATS)
+        self.heat_stats = heat_wait_stats.HeatWaitRecorder(self.printer, self.gcode)
+
     def _handle_connect(self):
         """Handle Klipper connect event"""
+        section = self.printer.lookup_object('gcode_preprocessor heat_wait_stats', None)
+        self.heat_stats.configure(section.values if section is not None else {},
+                                  self._default_stats_dir())
+
         # Load processors
         if self.enabled:
             self._load_processors()
+
+    def _default_stats_dir(self) -> Optional[str]:
+        """gcode-preprocessor/ next to printer.cfg"""
+        get_start_args = getattr(self.printer, 'get_start_args', None)
+        config_file = get_start_args().get('config_file') if get_start_args else None
+        if not config_file:
+            return None
+        return os.path.join(os.path.dirname(os.path.expanduser(config_file)), 'gcode-preprocessor')
 
     def _processor_config(self, processor_name: str):
         """Build the config helper from the [gcode_preprocessor <name>] section"""

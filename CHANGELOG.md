@@ -5,6 +5,15 @@ All notable changes to the Klipper G-code Preprocessor will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- heat_wait_stats processor: marks tool changes with `_KTC_HEAT_MARK`; Klipper measures
+  heating rate, mechanical tool change time and the time spent waiting for the nozzle
+  temperature per tool, stores the samples in `gcode-preprocessor/heat_stats.json` and
+  reports them with suggestions for standby temperature and preheat time at the end of
+  the print and via `KTC_HEAT_STATS`
+
 ## [1.1.0] - 2026-10-09
 
 ### Fixed

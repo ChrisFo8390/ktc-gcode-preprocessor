@@ -148,12 +148,46 @@ print_start_macros: PRINT_START, START_PRINT
 summary_macro: _KTC_TOOL_SUMMARY
 ```
 
+### heat_wait_stats
+Measures how long each tool change waits for the nozzle temperature and suggests a
+standby temperature and a preheat time. The processor marks every change to another
+tool with `_KTC_HEAT_MARK` (after the slicer's `M104 T<n>` preheat, before the `T<n>`,
+after the following `M109`); Klipper measures with these marks:
+
+- heating rate of each tool (from the preheat until the target is reached),
+- duration of a tool change that did not wait (the mechanical change time),
+- waiting time = change duration minus mechanical change time, if the nozzle was not hot yet.
+
+Samples are kept per tool in `gcode-preprocessor/heat_stats.json` next to `printer.cfg`
+(last 500 per tool). At the end of the print the report appears in the console:
+
+```
+KTC heat stats (print 2026-10-11 14:02:11): 639 tool changes, waiting for temperature 2h 41m
+Tool change without waiting: 7.9s
+T1: 207 changes, waited 205x - avg 21.4s, max 27.0s, total 1h 13m
+    heats 3.6C/s, from 125C to 225C, slicer preheat 1.2s before the change
+    suggestion: preheat 25s before the tool change, or with the current preheat a standby of 200C (delta -25C)
+```
+
+Standby suggestion → PrusaSlicer `standby_temperature_delta` (Ooze prevention).
+Preheat suggestion → how early the next tool would have to be heated (OrcaSlicer
+`preheat_time`; PrusaSlicer has no such option).
+
+```ini
+[gcode_preprocessor heat_wait_stats]
+tool_heaters:        # e.g. 0=extruder, 1=extruder1 (default: [tool Tn] extruder, else extruder<n>)
+report_at_end: True  # print the report when the print ends
+stats_file:          # default ~/printer_data/config/gcode-preprocessor/heat_stats.json
+max_samples: 500     # per tool
+```
+
 ## Commands
 
 | Command | |
 |---|---|
 | `LIST_GCODE_PROCESSORS` | loaded processors with their descriptions |
 | `PREPROCESS_GCODE_FILE FILE=<path>` | preprocess a file manually (background process; refused during a print unless `FORCE=1`) |
+| `KTC_HEAT_STATS [SCOPE=PRINT\|ALL] [TOOL=<n>] [RESET=1]` | heat wait report of the last print or of all recorded prints; `RESET=1` clears the samples |
 
 Processed files start with `; processed by ktc-gcode preprocessor (slicer: <name>)` and
 are not processed again (the old `klipper-gcode-preprocessor` marker is recognized too).

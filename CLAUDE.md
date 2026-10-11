@@ -102,6 +102,12 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
    - Macro in `config/tool-summary.cfg` (linked by install.sh) prints via `action_respond_info` with HTML colors; `#`, `;` and the degree sign are built with Jinja escapes because Klipper strips `#` comments from config files
    - See `klipper/extras/preprocessors/tool_summary.py`
 
+4. **heat_wait_stats**
+   - Inserts `_KTC_HEAT_MARK EVENT=START|PREHEAT|CHANGE|READY|END` around every change to another tool
+   - The same module holds `HeatWaitRecorder` (registered by the Klipper module: `_KTC_HEAT_MARK`, `KTC_HEAT_STATS`) and the plain analysis functions (`analyze()`, `format_report()`)
+   - Waiting time = change duration minus the mechanical change time (median of changes where the nozzle was already hot); samples persisted in `gcode-preprocessor/heat_stats.json`
+   - See `klipper/extras/preprocessors/heat_wait_stats.py`
+
 ### Key Patterns
 
 **Tool Change Detection:**
