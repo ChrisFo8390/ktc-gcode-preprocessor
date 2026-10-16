@@ -2,15 +2,15 @@
 # Brings every tool a print uses into a defined state at print start: loaded
 # into the extruder (AFC), purged and brushed, and retracted by the slicer's
 # tool change retraction. The first use of each tool in the G-code then pushes
-# exactly that length back.
+# exactly that length back - only if KTC_PREPARE_TOOLS retracted that tool.
 #
 # Both parts are configured in [gcode_preprocessor tool_prepare]:
 # - ToolPrepare (processor, runs at upload): inserts
 #   "_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. STANDBY=.. INITIAL=.." before the
-#   print start macro, and inserts "G1 E<retraction>" right before the first
-#   extrusion after the first tool change of every tool except the initial one
-#   (the slicer only pushes its normal travel unretract there, or nothing when
-#   the wipe tower primes the tool).
+#   print start macro, and inserts "_KTC_PREPARE_PUSH T=<n> E=<retraction>
+#   F=<speed>" right before the first extrusion after the first tool change of
+#   every tool except the initial one (the slicer only pushes its normal travel
+#   unretract there, or nothing when the wipe tower primes the tool).
 # - ToolPrepareRuntime (Klipper): KTC_PREPARE_TOOLS, called from PRINT_START
 #   after homing. Checks the AFC lanes of all tools, heats the tools staggered,
 #   then picks up each tool: lanes not loaded into the extruder are loaded by
@@ -47,6 +47,7 @@ except ImportError:
 
 
 SET_COMMAND = '_KTC_PREPARE_TOOLS_SET'
+PUSH_COMMAND = '_KTC_PREPARE_PUSH'
 # Initial tool passed to the print start macro (TOOL=0, T=T1, INITIAL_TOOL=2, ...)
 START_TOOL_PARAM = re.compile(r'(?:^|\s)(?:TOOL|T|INITIAL_TOOL|INITIAL_EXTRUDER)=T?(\d+)(?=\s|$)',
                               re.IGNORECASE)
@@ -141,7 +142,6 @@ class ToolPrepare(GcodePreprocessorPlugin):
         start_line: Optional[Tuple[int, str]] = None
         initial: Optional[int] = None
         first_tool: Optional[int] = None
-        relative = False
         tools: List[int] = []
         seen = set()
         pending: Optional[int] = None   # tool whose first extrusion is searched
@@ -160,12 +160,6 @@ class ToolPrepare(GcodePreprocessorPlugin):
                 match = START_TOOL_PARAM.search(words[1] if len(words) > 1 else '')
                 if match:
                     initial = int(match.group(1))
-                continue
-            if upper.startswith('M83'):
-                relative = True
-                continue
-            if upper.startswith('M82'):
-                relative = False
                 continue
 
             tool = GcodePatterns.extract_tool_number(command)
@@ -203,15 +197,13 @@ class ToolPrepare(GcodePreprocessorPlugin):
                          f"RETRACT={values(retract)} STANDBY={values(standby)} INITIAL={initial}\n")
         self.replace[start_line[0]] = (start_line[1], [self.set_line, start_line[1]])
 
-        if not relative:
-            self.logger.warning("tool_prepare: Absolute extrusion (M82) - no push back inserted")
-            return True
         speeds = self._speeds(slicer_config, tools)
         for index, tool, raw in fixes:
             length = retract.get(tool, 0.)
             if length <= 0:
                 continue
-            push = f"G1 E{length:g} F{speeds[tool] * 60:g} ; tool_prepare: push back prepare retraction\n"
+            # Only pushes in Klipper if KTC_PREPARE_TOOLS retracted this tool
+            push = f"{PUSH_COMMAND} T={tool} E={length:g} F={speeds[tool] * 60:g}\n"
             self.replace[index] = (raw, [push, raw])
             self.fixed += 1
         self.logger.info(f"tool_prepare: Tools {tools}, initial T{initial}, "
@@ -280,9 +272,12 @@ class ToolPrepareRuntime:
         self.abort_on_empty = options.getboolean('abort_on_empty', True)
         self.tool_heaters = self._parse_tool_heaters(options.get('tool_heaters', ''))
         self.data: Optional[Dict[str, Any]] = None
+        # tool -> length KTC_PREPARE_TOOLS retracted it in the current print
+        self.retracted: Dict[int, float] = {}
         self.gcode.register_command(SET_COMMAND, self.cmd_SET, desc=self.cmd_SET_help)
         self.gcode.register_command('KTC_PREPARE_TOOLS', self.cmd_KTC_PREPARE_TOOLS,
                                     desc=self.cmd_KTC_PREPARE_TOOLS_help)
+        self.gcode.register_command(PUSH_COMMAND, self.cmd_PUSH, desc=self.cmd_PUSH_help)
 
     @staticmethod
     def _parse_tool_heaters(value: str) -> Dict[int, str]:
@@ -366,6 +361,12 @@ class ToolPrepareRuntime:
                   f"G1 Z{self.safe_z:g} F{self.z_speed * 60:g}\n"
                   "RESTORE_GCODE_STATE NAME=_ktc_prepare_z")
 
+    def _extrude(self, length: float, feedrate: float):
+        """Relative E move of the active tool, extrusion mode and position kept"""
+        self._run("SAVE_GCODE_STATE NAME=_ktc_prepare\nM83\n"
+                  f"G1 E{length:g} F{feedrate:g}\n"
+                  "RESTORE_GCODE_STATE NAME=_ktc_prepare")
+
     def _run(self, script: str):
         self.gcode.run_script_from_command(script)
 
@@ -387,6 +388,7 @@ class ToolPrepareRuntime:
         standby = numbers('STANDBY', float) or [0.] * len(tools)
         if not tools or not len(temps) == len(retract) == len(standby) == len(tools):
             raise gcmd.error(f"{SET_COMMAND}: TOOLS, TEMPS, RETRACT and STANDBY need one value per tool")
+        self.retracted = {}   # a new print starts
         self.data = {'tools': tools, 'temps': dict(zip(tools, temps)),
                      'retract': dict(zip(tools, retract)), 'standby': dict(zip(tools, standby)),
                      'initial': gcmd.get_int('INITIAL', tools[0])}
@@ -395,6 +397,7 @@ class ToolPrepareRuntime:
                                   "[STAGGER=<s>] [MAX_HEATING=<n>]")
     def cmd_KTC_PREPARE_TOOLS(self, gcmd):
         data, self.data = self.data, None   # never reused for a later print
+        self.retracted = {}
         if data is None:
             gcmd.respond_info("KTC_PREPARE_TOOLS: no tool data (file not processed by tool_prepare) - skipped")
             return
@@ -477,11 +480,22 @@ class ToolPrepareRuntime:
             # No load and no purge: leave the filament where it is
             self.gcode.respond_info(f"KTC_PREPARE_TOOLS: T{tool} not purged (no purge macro) - not retracted")
         elif retract > 0:
-            self._run("SAVE_GCODE_STATE NAME=_ktc_prepare\nM83\n"
-                      f"G1 E-{retract:g} F{self.retract_speed * 60:g}\n"
-                      "RESTORE_GCODE_STATE NAME=_ktc_prepare")
+            self._extrude(-retract, self.retract_speed * 60)
+            self.retracted[tool] = retract
         if not is_initial:
             self._heat(heater, standby)
 
+    cmd_PUSH_help = "Push back the KTC_PREPARE_TOOLS retraction at the first use of a tool (inserted by tool_prepare)"
+    def cmd_PUSH(self, gcmd):
+        tool = gcmd.get_int('T', minval=0)
+        retracted = self.retracted.pop(tool, None)
+        if retracted is None:
+            # Not prepared in this print: the filament stays where the slicer expects it
+            return
+        length = min(gcmd.get_float('E', retracted, minval=0.), retracted)
+        if length > 0:
+            self._extrude(length, gcmd.get_float('F', self.retract_speed * 60, above=0.))
+
     def get_status(self, eventtime):
-        return {'options': dict(self.values), 'pending': self.data is not None}
+        return {'options': dict(self.values), 'pending': self.data is not None,
+                'retracted': {f'T{t}': length for t, length in self.retracted.items()}}

@@ -191,9 +191,9 @@ history_file: ~/printer_data/logs/ktc_heat_stats.jsonl
 tool_heaters:                # e.g. 0=extruder, 1=extruder1
 ```
 The section is optional. Heater per tool: `tool_heaters`, else the `extruder` of
-klipper-toolchanger's `[tool Tn]`, else `extruder`/`extruder{n}`. Klipper registers
-`_KTC_HEAT_MARK` only while `heat_stats` is in `processors`; files processed with it
-need it (or a re-upload without it). Marker times are taken when Klipper reads the line,
+klipper-toolchanger's `[tool Tn]`, else `extruder`/`extruder{n}`. `_KTC_HEAT_MARK` and
+`KTC_HEAT_STATS` are always registered, so files processed with heat_stats also print
+after it was removed from `processors`. Marker times are taken when Klipper reads the line,
 so the measured preheat lead can be off by the move buffer (up to about 2 s).
 
 ### tool_prepare
@@ -207,11 +207,12 @@ print therefore starts about 10 mm short.
   RETRACT=10,10,10 STANDBY=125,125,125 INITIAL=4` before `PRINT_START` (tools, print
   temperatures, retraction and standby from the slicer: `filament_retract_length_toolchange`
   overrides the retraction, standby is `idle_temperature` or temperature +
-  `standby_temperature_delta`) and adds
-  `G1 E<retraction> F<deretract_speed>` right before the first extrusion after the
-  first tool change of every tool except the initial one (before the travel
-  unretract, or before the first wipe tower extrusion). Needs `token_replacer`
-  before it and relative extrusion (`M83`).
+  `standby_temperature_delta`) and adds `_KTC_PREPARE_PUSH T=<n> E=<retraction>
+  F=<deretract_speed>` right before the first extrusion after the first tool change
+  of every tool except the initial one (before the travel unretract, or before the
+  first wipe tower extrusion). It pushes only if `KTC_PREPARE_TOOLS` retracted that
+  tool in this print, at most once and never more than was retracted, in its own
+  relative-extrusion state. Needs `token_replacer` before it.
 - Call `KTC_PREPARE_TOOLS` in your `PRINT_START` after homing/probing, before the
   initial tool is selected and the purge line is printed. It
   1. checks the AFC lane of every tool and aborts before anything heats if one has no
@@ -227,7 +228,8 @@ print therefore starts about 10 mm short.
      purged nor retracted (its filament position is unknown, the purge line primes it).
 - Without the `_KTC_PREPARE_TOOLS_SET` data (file not processed) the command does nothing.
   `KTC_PREPARE_TOOLS` is always registered (also when `tool_prepare` is not in
-  `processors`), so PRINT_START can call it on every printer.
+  `processors`), so PRINT_START can call it on every printer. Without a prepare
+  retraction `_KTC_PREPARE_PUSH` does nothing.
 - Without AFC: no lane check and no loading; tools are heated, picked up and purged with
   `purge_cmd`/`wipe_cmd` if set. Purge/brush macros that are not defined are skipped with a
   message. A tool that was neither loaded nor purged is not retracted.

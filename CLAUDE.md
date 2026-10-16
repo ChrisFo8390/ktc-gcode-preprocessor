@@ -65,7 +65,7 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
 **Klipper Integration:**
 - Lives in `klipper/extras/` (symlinked to `~/klipper/klippy/extras/`)
 - Loaded as Klipper module via `load_config()` function
-- Registers G-code commands: `PREPROCESS_GCODE_FILE`, `LIST_GCODE_PROCESSORS` (heat_stats adds `KTC_HEAT_STATS` and `_KTC_HEAT_MARK`)
+- Registers G-code commands: `PREPROCESS_GCODE_FILE`, `LIST_GCODE_PROCESSORS` (heat_stats adds `KTC_HEAT_STATS` and `_KTC_HEAT_MARK`, tool_prepare `KTC_PREPARE_TOOLS`, `_KTC_PREPARE_TOOLS_SET`, `_KTC_PREPARE_PUSH`; all always registered)
 - Processors live in `klipper/extras/preprocessors/` subdirectory
 
 **Moonraker Integration (Optional):**
@@ -104,15 +104,15 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
 
 4. **heat_stats**
    - Processor inserts `_KTC_HEAT_MARK EVENT=RESET|PREHEAT|BEGIN|END|REPORT` lines (PREHEAT before `M104 .. ; preheat Tn time: Ns`, BEGIN before a tool change after the first extruding move, END after the last heat wait before the next motion, REPORT after the last line); inserts only when the line equals the stored original, so other processors may change neighbouring lines
-   - `HeatStatsRuntime` (same file) is the Klipper part: `load_config_prefix` returns it for `[gcode_preprocessor heat_stats]`, `GcodePreprocessor.__init__` adds it when `heat_stats` is listed without a section; registers `_KTC_HEAT_MARK` and `KTC_HEAT_STATS`
+   - `HeatStatsRuntime` (same file) is the Klipper part: `load_config_prefix` returns it for `[gcode_preprocessor heat_stats]`, `GcodePreprocessor.__init__` adds it without a section (always, see `ALWAYS_REGISTERED`); registers `_KTC_HEAT_MARK` and `KTC_HEAT_STATS`
    - Wait = toolhead standstill (`toolhead.check_busy()` lookahead empty and est_print_time > print_time, or print_time equal to the last `toolhead:sync_print_time`) while the heater is off target or `heater.check_busy()`
    - Pure `summarize()`/`format_report()` compute the suggestions (testable without Klipper)
    - See `klipper/extras/preprocessors/heat_stats.py`
 
 5. **tool_prepare**
-   - Processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. STANDBY=.. INITIAL=..` before the print start macro (data from `token_replacer`'s slicer_config) and inserts `G1 E<retraction> F<deretract_speed>` before the first extrusion (first G0-G3 with positive E) after the first tool change of each non-initial tool (relative extrusion only)
+   - Processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. STANDBY=.. INITIAL=..` before the print start macro (data from `token_replacer`'s slicer_config) and inserts `_KTC_PREPARE_PUSH T=<n> E=<retraction> F=<deretract_speed*60>` before the first extrusion (first G0-G3 with positive E) after the first tool change of each non-initial tool; the runtime pushes only if it retracted that tool in this print (`retracted` dict, cleared by `_KTC_PREPARE_TOOLS_SET` and `KTC_PREPARE_TOOLS`)
    - `ToolPrepareRuntime` (same file): `_KTC_PREPARE_TOOLS_SET` stores the data, `KTC_PREPARE_TOOLS` (called from the user's PRINT_START) checks AFC lanes (`AFC.lanes[..].get_status()`: `map`, `load`, `tool_loaded`), heats per `heating_plan()`, lifts to `safe_z`, runs `T<n>`, AFC `poop_cmd`/`wipe_cmd` for already loaded tools, retracts, sets the slicer standby (`standby_temp` overrides)
-   - Runtime classes are wired via `RUNTIME_PROCESSORS` in `gcode_preprocessor.py` (also used by heat_stats); `ALWAYS_REGISTERED` creates the tool_prepare runtime even when it is not in `processors`
+   - Runtime classes are wired via `RUNTIME_PROCESSORS` in `gcode_preprocessor.py` (also used by heat_stats); `ALWAYS_REGISTERED` creates the heat_stats and tool_prepare runtimes even when they are not in `processors`
    - Must work without AFC, toolchanger and purge/brush macros: missing objects/macros are skipped, a tool neither loaded nor purged is not retracted
    - See `klipper/extras/preprocessors/tool_prepare.py`
 

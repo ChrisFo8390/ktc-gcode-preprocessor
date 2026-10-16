@@ -252,7 +252,7 @@ RUNTIME_PROCESSORS = {
 }
 # Runtimes whose commands exist even when the processor is not listed, so a
 # PRINT_START calling them works with every file (the command then does nothing)
-ALWAYS_REGISTERED = ('tool_prepare',)
+ALWAYS_REGISTERED = ('heat_stats', 'tool_prepare')
 
 
 def _create_runtime(processor_name, config, values, section_name=None):

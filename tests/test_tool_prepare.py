@@ -100,14 +100,14 @@ class ProcessorTests(unittest.TestCase):
 
     def test_push_back_before_first_extrusion(self):
         lines = self.run_on(SAMPLE, [tokens(), processor()])
-        pushes = [i for i, l in enumerate(lines) if 'tool_prepare: push back' in l]
+        pushes = [i for i, l in enumerate(lines) if l.startswith('_KTC_PREPARE_PUSH')]
         self.assertEqual(len(pushes), 2)
         # First use of T3: inserted right before its unretract (E1 stays), 8 mm override
-        self.assertEqual(lines[pushes[0]], 'G1 E8 F2100 ; tool_prepare: push back prepare retraction')
+        self.assertEqual(lines[pushes[0]], '_KTC_PREPARE_PUSH T=3 E=8 F=2100')
         self.assertEqual(lines[pushes[0] + 1], 'G1 E1 F2100')
         self.assertGreater(pushes[0], lines.index('T3 ; change tool'))
         # T0 extrudes without an unretract: inserted before that move
-        self.assertEqual(lines[pushes[1]], 'G1 E10 F2100 ; tool_prepare: push back prepare retraction')
+        self.assertEqual(lines[pushes[1]], '_KTC_PREPARE_PUSH T=0 E=10 F=2100')
         self.assertEqual(lines[pushes[1] + 1], 'G1 X11 Y10 E0.5')
         # Initial tool and later uses unchanged
         self.assertEqual(lines.count('G1 E10 F2100'), 2)
@@ -118,17 +118,17 @@ class ProcessorTests(unittest.TestCase):
                               'G1 X258 Y132\nG1 X198 E2.69 F2376\n')
         lines = self.run_on(text, [tokens(), processor()])
         i = lines.index('G1 X198 E2.69 F2376')
-        self.assertEqual(lines[i - 1], 'G1 E8 F2100 ; tool_prepare: push back prepare retraction')
+        self.assertEqual(lines[i - 1], '_KTC_PREPARE_PUSH T=3 E=8 F=2100')
 
     def test_fixed_retract_length(self):
         lines = self.run_on(SAMPLE, [tokens(), processor(retract_length='5')])
         self.assertTrue(any('RETRACT=5,5,5' in l for l in lines))
-        self.assertIn('G1 E5 F2100 ; tool_prepare: push back prepare retraction', lines)
+        self.assertIn('_KTC_PREPARE_PUSH T=3 E=5 F=2100', lines)
 
-    def test_absolute_extrusion_only_set_line(self):
+    def test_absolute_extrusion_also_pushed(self):
+        # The push runs in its own relative-extrusion state, M82 files work too
         lines = self.run_on(SAMPLE.replace('M83 ;', 'M82 ;'), [tokens(), processor()])
-        self.assertTrue(any(l.startswith('_KTC_PREPARE_TOOLS_SET') for l in lines))
-        self.assertFalse(any('tool_prepare: push back' in l for l in lines))
+        self.assertEqual(sum(1 for l in lines if l.startswith('_KTC_PREPARE_PUSH')), 2)
 
     def test_without_token_replacer_nothing_changes(self):
         lines = self.run_on(SAMPLE, [processor()])
@@ -238,7 +238,7 @@ class FakeGcmd:
     def get_int(self, name, default=None, minval=None):
         return int(self.params[name]) if name in self.params else default
 
-    def get_float(self, name, default=None, minval=None):
+    def get_float(self, name, default=None, minval=None, above=None):
         return float(self.params[name]) if name in self.params else default
 
     def respond_info(self, msg):
@@ -340,6 +340,40 @@ class RuntimeTests(unittest.TestCase):
             runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
         self.assertEqual(self.gcode.scripts, [])
 
+    def push_scripts(self, runtime, **params):
+        before = len(self.gcode.scripts)
+        runtime.cmd_PUSH(FakeGcmd(**params))
+        return self.gcode.scripts[before:]
+
+    def test_push_only_after_prepare_retraction(self):
+        runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, False),
+                             'lane4': FakeLane(4, True)}, heat_stagger='0', safe_z='0')
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        # T3 (loaded by AFC) and T0 (purged) were retracted, the loaded initial T4 not
+        self.assertEqual(runtime.retracted, {3: 10., 0: 10.})
+        push = self.push_scripts(runtime, T=3, E=10, F=2100)
+        self.assertEqual(push, ['SAVE_GCODE_STATE NAME=_ktc_prepare\nM83\nG1 E10 F2100\n'
+                                'RESTORE_GCODE_STATE NAME=_ktc_prepare'])
+        # Only once per print
+        self.assertEqual(self.push_scripts(runtime, T=3, E=10, F=2100), [])
+        # Never more than was retracted
+        self.assertIn('G1 E10 F2100', self.push_scripts(runtime, T=0, E=15, F=2100)[0])
+        # Tool not retracted by KTC_PREPARE_TOOLS: nothing
+        self.assertEqual(self.push_scripts(runtime, T=4, E=10, F=2100), [])
+
+    def test_no_push_without_prepare(self):
+        runtime = self.make({'lane3': FakeLane(3, True)})
+        self.assertEqual(self.push_scripts(runtime, T=3, E=10, F=2100), [])
+
+    def test_new_print_clears_retractions(self):
+        runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
+                             'lane4': FakeLane(4, True)}, heat_stagger='0', safe_z='0')
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        self.assertTrue(runtime.retracted)
+        # Next file: its _KTC_PREPARE_TOOLS_SET starts a new print
+        runtime.cmd_SET(FakeGcmd(TOOLS='3', TEMPS='225', RETRACT='10', STANDBY='125', INITIAL=3))
+        self.assertEqual(self.push_scripts(runtime, T=0, E=10, F=2100), [])
+
     def test_no_lift_when_already_high(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
                              'lane4': FakeLane(4, True)})
@@ -376,6 +410,67 @@ class RuntimeTests(unittest.TestCase):
         runtime.cmd_KTC_PREPARE_TOOLS(gcmd)
         self.assertIn('skipped', gcmd.responses[0])
         self.assertEqual(self.gcode.scripts, [])
+
+
+class ModulePrinter:
+    """Just enough of Klipper's printer for GcodePreprocessor.__init__"""
+
+    class Reactor:
+        NEVER = 9999999999999999.
+
+        def monotonic(self):
+            return 0.
+
+        def register_timer(self, callback, waketime):
+            return [callback, waketime]
+
+    def __init__(self):
+        self.objects = {'gcode': FakeGcode(None)}
+        self.reactor = self.Reactor()
+
+    def get_reactor(self):
+        return self.reactor
+
+    def lookup_object(self, name, default=None):
+        return self.objects.get(name, default)
+
+    def add_object(self, name, obj):
+        self.objects[name] = obj
+
+    def register_event_handler(self, event, callback):
+        pass
+
+
+class ModuleConfig:
+    def __init__(self, printer, values):
+        self.printer, self.values = printer, values
+
+    def get_printer(self):
+        return self.printer
+
+    def get_name(self):
+        return 'gcode_preprocessor'
+
+    def get(self, option, default=None):
+        return self.values.get(option, default)
+
+    def getboolean(self, option, default=None):
+        return default
+
+    def has_section(self, name):
+        return False
+
+
+class AlwaysRegisteredTests(unittest.TestCase):
+    def test_runtime_commands_without_processors(self):
+        sys.path.append(os.path.join(REPO, 'klipper'))
+        module = importlib.import_module('extras.gcode_preprocessor')
+        printer = ModulePrinter()
+        module.load_config(ModuleConfig(printer, {'processors': 'token_replacer'}))
+        commands = printer.objects['gcode'].commands
+        for name in ('KTC_PREPARE_TOOLS', '_KTC_PREPARE_TOOLS_SET', '_KTC_PREPARE_PUSH',
+                     '_KTC_HEAT_MARK', 'KTC_HEAT_STATS'):
+            self.assertIn(name, commands)
 
 
 if __name__ == '__main__':

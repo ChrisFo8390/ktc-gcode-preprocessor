@@ -11,8 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tool_prepare processor + `KTC_PREPARE_TOOLS`: at print start every tool of the print is
   checked (AFC lane), heated staggered (`heat_stagger`, `max_heating`), loaded by AFC or
   purged/brushed with the AFC macros and retracted by the slicer's tool change
-  retraction; the processor inserts `G1 E<retraction>` before the first extrusion of
-  every tool (the slicer only pushes the travel unretract at the first use of a tool)
+  retraction; the processor inserts `_KTC_PREPARE_PUSH T=<n> E=<retraction> F=<speed>`
+  before the first extrusion of every tool (the slicer only pushes the travel unretract
+  at the first use of a tool), which pushes only if the tool was retracted by
+  `KTC_PREPARE_TOOLS` in this print; works without AFC or purge/brush macros
+- heat_stats commands (`_KTC_HEAT_MARK`, `KTC_HEAT_STATS`) are always registered
 - heat_stats processor + Klipper runtime: measures per tool how long the printer stands
   still waiting for the nozzle temperature at tool changes (from the slicer preheat
   `; preheat Tn time: Ns` to the heat wait after the change, including the tool change
