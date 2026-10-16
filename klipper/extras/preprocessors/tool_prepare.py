@@ -6,7 +6,7 @@
 #
 # Both parts are configured in [gcode_preprocessor tool_prepare]:
 # - ToolPrepare (processor, runs at upload): inserts
-#   "_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. INITIAL=.." before the
+#   "_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. STANDBY=.. INITIAL=.." before the
 #   print start macro, and inserts "G1 E<retraction>" right before the first
 #   extrusion after the first tool change of every tool except the initial one
 #   (the slicer only pushes its normal travel unretract there, or nothing when
@@ -97,6 +97,20 @@ class ToolPrepare(GcodePreprocessorPlugin):
         return {tool: _number(deretract, tool) or _number(retract, tool) or 35.
                 for tool in tools}
 
+    @staticmethod
+    def _standby(slicer_config: Dict[str, str], tools: List[int],
+                 temps: Dict[int, float]) -> Dict[int, float]:
+        """Slicer standby per tool: idle_temperature, else temperature + standby_temperature_delta"""
+        idle = _split(slicer_config.get('idle_temperature'))
+        delta = _number(_split(slicer_config.get('standby_temperature_delta')), 0)
+        result = {}
+        for tool in tools:
+            value = _number(idle, tool)  # 'nil' = not set
+            if value is None or value <= 0:
+                value = temps[tool] + delta if delta is not None and temps[tool] > 0 else 0.
+            result[tool] = max(0., value)
+        return result
+
     def _retractions(self, slicer_config: Dict[str, str], tools: List[int]) -> Dict[int, float]:
         printer = _split(slicer_config.get('retract_length_toolchange'))
         filament = _split(slicer_config.get('filament_retract_length_toolchange'))
@@ -174,13 +188,14 @@ class ToolPrepare(GcodePreprocessorPlugin):
             tools.insert(0, initial)
 
         temperatures = _split(','.join(context.get_metadata('temperatures', []) or []))
-        temps = []
-        for tool in tools:
-            temp = _number(temperatures, tool)
-            temps.append(f"{temp:g}" if temp else '0')
+        temps = {tool: _number(temperatures, tool) or 0. for tool in tools}
         retract = self._retractions(slicer_config, tools)
-        self.set_line = (f"{SET_COMMAND} TOOLS={','.join(map(str, tools))} TEMPS={','.join(temps)} "
-                         f"RETRACT={','.join(f'{retract[t]:g}' for t in tools)} INITIAL={initial}\n")
+        standby = self._standby(slicer_config, tools, temps)
+
+        def values(table):
+            return ','.join(f'{table[t]:g}' for t in tools)
+        self.set_line = (f"{SET_COMMAND} TOOLS={','.join(map(str, tools))} TEMPS={values(temps)} "
+                         f"RETRACT={values(retract)} STANDBY={values(standby)} INITIAL={initial}\n")
         self.replace[start_line[0]] = (start_line[1], [self.set_line, start_line[1]])
 
         if not relative:
@@ -246,7 +261,8 @@ class ToolPrepareRuntime:
         options = ProcessorConfig(self.name, self.values, logging)
         self.heat_stagger = max(0., options.getfloat('heat_stagger', 10.))
         self.max_heating = max(0, options.getint('max_heating', 3))
-        self.standby_temp = options.getfloat('standby_temp', 0.)
+        # None: slicer standby (STANDBY from the processor); a value overrides it
+        self.standby_temp = options.getfloat('standby_temp', None)
         self.temp_tolerance = options.getfloat('temp_tolerance', 2.)
         self.retract_speed = options.getfloat('retract_speed', 35.)
         self.purge_initial = options.getboolean('purge_initial', False)
@@ -322,10 +338,11 @@ class ToolPrepareRuntime:
         tools = numbers('TOOLS', int)
         temps = numbers('TEMPS', float)
         retract = numbers('RETRACT', float)
-        if not tools or len(temps) != len(tools) or len(retract) != len(tools):
-            raise gcmd.error(f"{SET_COMMAND}: TOOLS, TEMPS and RETRACT need one value per tool")
+        standby = numbers('STANDBY', float) or [0.] * len(tools)
+        if not tools or not len(temps) == len(retract) == len(standby) == len(tools):
+            raise gcmd.error(f"{SET_COMMAND}: TOOLS, TEMPS, RETRACT and STANDBY need one value per tool")
         self.data = {'tools': tools, 'temps': dict(zip(tools, temps)),
-                     'retract': dict(zip(tools, retract)),
+                     'retract': dict(zip(tools, retract)), 'standby': dict(zip(tools, standby)),
                      'initial': gcmd.get_int('INITIAL', tools[0])}
 
     cmd_KTC_PREPARE_TOOLS_help = ("Load, purge and retract the tools of the current print "
@@ -357,7 +374,8 @@ class ToolPrepareRuntime:
         for tool, lane in lanes.items():
             state = 'no AFC lane' if lane is None else (
                 'in extruder' if lane.get('tool_loaded') else 'loaded in unit')
-            lines.append(f"T{tool}: {data['temps'][tool]:g}C, retract {data['retract'][tool]:g}mm, {state}")
+            lines.append(f"T{tool}: {data['temps'][tool]:g}C, standby {self._standby_for(data, tool):g}C, "
+                         f"retract {data['retract'][tool]:g}mm, {state}")
         gcmd.respond_info("KTC_PREPARE_TOOLS:\n" + "\n".join(lines))
         try:
             for index, (tool, wait_for) in enumerate(heating_plan(order, max_heating)):
@@ -370,7 +388,7 @@ class ToolPrepareRuntime:
             # 3. Load / purge / retract each tool
             for tool in order:
                 self._prepare(tool, heaters[tool], data['temps'][tool], data['retract'][tool],
-                              lanes[tool], tool == initial)
+                              self._standby_for(data, tool), lanes[tool], tool == initial)
         except Exception:
             for tool in order:
                 if tool != initial:
@@ -378,7 +396,12 @@ class ToolPrepareRuntime:
             raise
         gcmd.respond_info(f"KTC_PREPARE_TOOLS: {len(order)} tool(s) prepared, T{initial} active")
 
-    def _prepare(self, tool: int, heater: str, temp: float, retract: float,
+    def _standby_for(self, data: Dict[str, Any], tool: int) -> float:
+        if self.standby_temp is not None:
+            return self.standby_temp
+        return data['standby'][tool]
+
+    def _prepare(self, tool: int, heater: str, temp: float, retract: float, standby: float,
                  lane: Optional[Dict[str, Any]], is_initial: bool):
         was_loaded = lane is None or bool(lane.get('tool_loaded'))
         self._run(f"T{tool}")   # AFC loads (and purges/brushes) a lane not in the extruder
@@ -401,7 +424,7 @@ class ToolPrepareRuntime:
                       f"G1 E-{retract:g} F{self.retract_speed * 60:g}\n"
                       "RESTORE_GCODE_STATE NAME=_ktc_prepare")
         if not is_initial:
-            self._heat(heater, self.standby_temp)
+            self._heat(heater, standby)
 
     def get_status(self, eventtime):
         return {'options': dict(self.values), 'pending': self.data is not None}

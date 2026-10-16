@@ -204,8 +204,10 @@ of a tool does not miss filament: the slicer retracts each tool by
 print therefore starts about 10 mm short.
 
 - The processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=4,3,0 TEMPS=225,225,225
-  RETRACT=10,10,10 INITIAL=4` before `PRINT_START` (tools, print temperatures and
-  retraction from the slicer, `filament_retract_length_toolchange` overrides) and adds
+  RETRACT=10,10,10 STANDBY=125,125,125 INITIAL=4` before `PRINT_START` (tools, print
+  temperatures, retraction and standby from the slicer: `filament_retract_length_toolchange`
+  overrides the retraction, standby is `idle_temperature` or temperature +
+  `standby_temperature_delta`) and adds
   `G1 E<retraction> F<deretract_speed>` right before the first extrusion after the
   first tool change of every tool except the initial one (before the travel
   unretract, or before the first wipe tower extrusion). Needs `token_replacer`
@@ -219,7 +221,8 @@ print therefore starts about 10 mm short.
   3. picks up each tool (initial tool last): a lane not loaded into the extruder is
      loaded by AFC, which runs its poop/wipe macros; a loaded tool is purged and
      brushed with the AFC macros (`poop_cmd`/`wipe_cmd` from `[AFC]`); then it
-     retracts by the slicer value and sets the tool to `standby_temp`,
+     retracts by the slicer value and sets the tool to its slicer standby temperature
+     (or `standby_temp`, if set),
   4. leaves the initial tool picked up and hot. If it was already loaded it is neither
      purged nor retracted (its filament position is unknown, the purge line primes it).
 - Without the `_KTC_PREPARE_TOOLS_SET` data (file not processed) the command does nothing.
@@ -228,7 +231,7 @@ print therefore starts about 10 mm short.
 [gcode_preprocessor tool_prepare]
 heat_stagger: 10        # s between starting the tool heaters
 max_heating: 3          # tools heating up at the same time (0 = no limit)
-standby_temp: 0         # temperature of prepared tools until their first use
+standby_temp:           # until first use; default: slicer standby (e.g. 225 - 100 = 125)
 abort_on_empty: True    # abort the print if a needed lane has no filament
 purge_initial: False    # also purge an already loaded initial tool
 retract_speed: 35       # mm/s

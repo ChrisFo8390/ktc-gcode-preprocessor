@@ -57,6 +57,9 @@ PRINT_END
 ; retract_length_toolchange = 10,10,10,10,10
 ; filament_retract_length_toolchange = nil,nil,nil,8,nil
 ; temperature = 225,225,225,230,225
+; idle_temperature = nil,nil,nil,nil,170
+; ooze_prevention = 1
+; standby_temperature_delta = -100
 """
 
 
@@ -91,8 +94,9 @@ class ProcessorTests(unittest.TestCase):
         lines = self.run_on(SAMPLE, [tokens(), processor()])
         i = next(i for i, l in enumerate(lines) if l.startswith('PRINT_START'))
         # T3 uses the filament override (8), the others the printer value (10)
+        # Standby: temperature + standby_temperature_delta, T4 uses its idle_temperature
         self.assertEqual(lines[i - 1], '_KTC_PREPARE_TOOLS_SET TOOLS=4,3,0 TEMPS=225,230,225 '
-                                       'RETRACT=10,8,10 INITIAL=4')
+                                       'RETRACT=10,8,10 STANDBY=170,130,125 INITIAL=4')
 
     def test_push_back_before_first_extrusion(self):
         lines = self.run_on(SAMPLE, [tokens(), processor()])
@@ -224,7 +228,8 @@ class RuntimeTests(unittest.TestCase):
         self.gcode = FakeGcode(self.afc)
         printer = FakePrinter({'gcode': self.gcode, 'AFC': self.afc})
         runtime = tool_prepare.ToolPrepareRuntime(FakeConfig(printer), options)
-        runtime.cmd_SET(FakeGcmd(TOOLS='4,3,0', TEMPS='225,225,225', RETRACT='10,10,10', INITIAL=4))
+        runtime.cmd_SET(FakeGcmd(TOOLS='4,3,0', TEMPS='225,225,225', RETRACT='10,10,10',
+                                 STANDBY='125,125,125', INITIAL=4))
         return runtime
 
     def test_heating_plan(self):
@@ -247,7 +252,8 @@ class RuntimeTests(unittest.TestCase):
         i = rest.index('T3')
         self.assertNotIn('AFC_POOP EXTRUDER=extruder3', rest)
         self.assertIn('G1 E-10 F2100', rest[i + 2])
-        self.assertEqual(rest[i + 3], 'SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=0')
+        # Slicer standby (225 - 100)
+        self.assertEqual(rest[i + 3], 'SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=125')
         # T0 already loaded: purged and brushed by us
         i = rest.index('T0')
         self.assertEqual(rest[i + 2:i + 4], ['AFC_POOP EXTRUDER=extruder', 'AFC_BRUSH EXTRUDER=extruder'])
@@ -265,6 +271,13 @@ class RuntimeTests(unittest.TestCase):
             'SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=225', 'G4 P10000',
             'SET_HEATER_TEMPERATURE HEATER=extruder TARGET=225', 'G4 P10000',
             'SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=225'])
+
+    def test_standby_temp_option_overrides_slicer(self):
+        runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
+                             'lane4': FakeLane(4, True)}, standby_temp='0')
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        self.assertIn('SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=0', self.gcode.scripts)
+        self.assertNotIn('SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=125', self.gcode.scripts)
 
     def test_loaded_initial_tool_untouched(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
