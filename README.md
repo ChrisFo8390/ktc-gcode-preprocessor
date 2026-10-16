@@ -206,9 +206,10 @@ print therefore starts about 10 mm short.
 - The processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=4,3,0 TEMPS=225,225,225
   RETRACT=10,10,10 INITIAL=4` before `PRINT_START` (tools, print temperatures and
   retraction from the slicer, `filament_retract_length_toolchange` overrides) and adds
-  the retraction to the first unretract after the first tool change of every tool
-  except the initial one (`G1 E1` becomes `G1 E11`). Needs `token_replacer` before it
-  and relative extrusion (`M83`).
+  `G1 E<retraction> F<deretract_speed>` right before the first extrusion after the
+  first tool change of every tool except the initial one (before the travel
+  unretract, or before the first wipe tower extrusion). Needs `token_replacer`
+  before it and relative extrusion (`M83`).
 - Call `KTC_PREPARE_TOOLS` in your `PRINT_START` after homing/probing, before the
   initial tool is selected and the purge line is printed. It
   1. checks the AFC lane of every tool and aborts before anything heats if one has no
@@ -226,7 +227,7 @@ print therefore starts about 10 mm short.
 ```ini
 [gcode_preprocessor tool_prepare]
 heat_stagger: 10        # s between starting the tool heaters
-max_heating: 2          # tools heating up at the same time (0 = no limit)
+max_heating: 3          # tools heating up at the same time (0 = no limit)
 standby_temp: 0         # temperature of prepared tools until their first use
 abort_on_empty: True    # abort the print if a needed lane has no filament
 purge_initial: False    # also purge an already loaded initial tool

@@ -7,9 +7,10 @@
 # Both parts are configured in [gcode_preprocessor tool_prepare]:
 # - ToolPrepare (processor, runs at upload): inserts
 #   "_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. INITIAL=.." before the
-#   print start macro, and adds the retraction to the first unretract after the
-#   first tool change of every tool except the initial one (the slicer only
-#   pushes its normal travel unretract there).
+#   print start macro, and inserts "G1 E<retraction>" right before the first
+#   extrusion after the first tool change of every tool except the initial one
+#   (the slicer only pushes its normal travel unretract there, or nothing when
+#   the wipe tower primes the tool).
 # - ToolPrepareRuntime (Klipper): KTC_PREPARE_TOOLS, called from PRINT_START
 #   after homing. Checks the AFC lanes of all tools, heats the tools staggered,
 #   then picks up each tool: lanes not loaded into the extruder are loaded by
@@ -44,11 +45,9 @@ SET_COMMAND = '_KTC_PREPARE_TOOLS_SET'
 # Initial tool passed to the print start macro (TOOL=0, T=T1, INITIAL_TOOL=2, ...)
 START_TOOL_PARAM = re.compile(r'(?:^|\s)(?:TOOL|T|INITIAL_TOOL|INITIAL_EXTRUDER)=T?(\d+)(?=\s|$)',
                               re.IGNORECASE)
-# Pure unretract: "G1 E1 F2100" (no axis words)
-UNRETRACT = re.compile(r'^G1\s+E(\d*\.?\d+)(\s+F[\d.]+)?\s*$', re.IGNORECASE)
 MOVE = re.compile(r'^G[0-3](?:\s|$)', re.IGNORECASE)
-AXIS_WORD = re.compile(r'\s[XY][-+]?\d*\.?\d+', re.IGNORECASE)
-EXTRUDE_WORD = re.compile(r'\sE(\d*\.?\d+)', re.IGNORECASE)
+# Positive E word: extrusion or unretract (not "E-1")
+EXTRUDE_WORD = re.compile(r'\sE\+?(\d*\.?\d+)', re.IGNORECASE)
 
 
 def _split(value: Optional[str]) -> List[str]:
@@ -67,7 +66,7 @@ def _number(values: List[str], index: int) -> Optional[float]:
 
 
 class ToolPrepare(GcodePreprocessorPlugin):
-    """Inserts the data for KTC_PREPARE_TOOLS and fixes the first unretract per tool"""
+    """Inserts the data for KTC_PREPARE_TOOLS and the push back at the first use of each tool"""
 
     def __init__(self, config, logger):
         super().__init__(config, logger)
@@ -89,6 +88,14 @@ class ToolPrepare(GcodePreprocessorPlugin):
     def get_description(self) -> str:
         return (f"Passes the used tools to KTC_PREPARE_TOOLS ({SET_COMMAND} before the print start "
                 f"macro) and pushes the prepare retraction back at the first use of each tool")
+
+    @staticmethod
+    def _speeds(slicer_config: Dict[str, str], tools: List[int]) -> Dict[int, float]:
+        """Unretract speed in mm/s per tool (deretract_speed, 0 = retract_speed)"""
+        deretract = _split(slicer_config.get('deretract_speed'))
+        retract = _split(slicer_config.get('retract_speed'))
+        return {tool: _number(deretract, tool) or _number(retract, tool) or 35.
+                for tool in tools}
 
     def _retractions(self, slicer_config: Dict[str, str], tools: List[int]) -> Dict[int, float]:
         printer = _split(slicer_config.get('retract_length_toolchange'))
@@ -118,8 +125,8 @@ class ToolPrepare(GcodePreprocessorPlugin):
         relative = False
         tools: List[int] = []
         seen = set()
-        pending: Optional[int] = None   # tool whose first unretract is searched
-        fixes: List[Tuple[int, int, str, bool]] = []  # (line, tool, text, is_unretract)
+        pending: Optional[int] = None   # tool whose first extrusion is searched
+        fixes: List[Tuple[int, int, str]] = []  # (line, tool, text)
 
         for index, raw in enumerate(PreprocessorUtilities.iter_file_lines(file_path)):
             line = raw.strip()
@@ -154,14 +161,8 @@ class ToolPrepare(GcodePreprocessorPlugin):
                         pending = tool
                 continue
 
-            if pending is None or not MOVE.match(command):
-                continue
-            if UNRETRACT.match(command):
-                fixes.append((index, pending, raw, True))
-                pending = None
-            elif AXIS_WORD.search(' ' + command) and EXTRUDE_WORD.search(' ' + command):
-                # Extrudes without an unretract before: push before this move
-                fixes.append((index, pending, raw, False))
+            if pending is not None and MOVE.match(command) and EXTRUDE_WORD.search(' ' + command):
+                fixes.append((index, pending, raw))
                 pending = None
 
         if start_line is None or not tools:
@@ -183,22 +184,18 @@ class ToolPrepare(GcodePreprocessorPlugin):
         self.replace[start_line[0]] = (start_line[1], [self.set_line, start_line[1]])
 
         if not relative:
-            self.logger.warning("tool_prepare: Absolute extrusion (M82) - first unretracts not changed")
+            self.logger.warning("tool_prepare: Absolute extrusion (M82) - no push back inserted")
             return True
-        for index, tool, raw, is_unretract in fixes:
+        speeds = self._speeds(slicer_config, tools)
+        for index, tool, raw in fixes:
             length = retract.get(tool, 0.)
             if length <= 0:
                 continue
-            if is_unretract:
-                match = UNRETRACT.match(raw.strip())
-                new = f"G1 E{float(match.group(1)) + length:g}{match.group(2) or ''}"
-                lines = [f"{new} ; +{length:g} tool_prepare retraction\n"]
-            else:
-                lines = [f"G1 E{length:g} F2100 ; tool_prepare retraction\n", raw]
-            self.replace[index] = (raw, lines)
+            push = f"G1 E{length:g} F{speeds[tool] * 60:g} ; tool_prepare: push back prepare retraction\n"
+            self.replace[index] = (raw, [push, raw])
             self.fixed += 1
         self.logger.info(f"tool_prepare: Tools {tools}, initial T{initial}, "
-                         f"{self.fixed} first unretracts extended")
+                         f"push back inserted at {self.fixed} first tool use(s)")
         return True
 
     def process_line(self, line: str, context: PreprocessorContext) -> List[str]:
@@ -248,7 +245,7 @@ class ToolPrepareRuntime:
         self.values = dict(values)
         options = ProcessorConfig(self.name, self.values, logging)
         self.heat_stagger = max(0., options.getfloat('heat_stagger', 10.))
-        self.max_heating = max(0, options.getint('max_heating', 2))
+        self.max_heating = max(0, options.getint('max_heating', 3))
         self.standby_temp = options.getfloat('standby_temp', 0.)
         self.temp_tolerance = options.getfloat('temp_tolerance', 2.)
         self.retract_speed = options.getfloat('retract_speed', 35.)

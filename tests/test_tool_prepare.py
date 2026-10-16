@@ -94,27 +94,37 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(lines[i - 1], '_KTC_PREPARE_TOOLS_SET TOOLS=4,3,0 TEMPS=225,230,225 '
                                        'RETRACT=10,8,10 INITIAL=4')
 
-    def test_first_unretract_per_tool_extended(self):
+    def test_push_back_before_first_extrusion(self):
         lines = self.run_on(SAMPLE, [tokens(), processor()])
-        # Initial tool T4: unchanged (the print start purge primes it)
-        self.assertIn('G1 E1 F2100', lines)
-        # First use of T3: E1 + 8
-        self.assertIn('G1 E9 F2100 ; +8 tool_prepare retraction', lines)
-        # Later uses unchanged
+        pushes = [i for i, l in enumerate(lines) if 'tool_prepare: push back' in l]
+        self.assertEqual(len(pushes), 2)
+        # First use of T3: inserted right before its unretract (E1 stays), 8 mm override
+        self.assertEqual(lines[pushes[0]], 'G1 E8 F2100 ; tool_prepare: push back prepare retraction')
+        self.assertEqual(lines[pushes[0] + 1], 'G1 E1 F2100')
+        self.assertGreater(pushes[0], lines.index('T3 ; change tool'))
+        # T0 extrudes without an unretract: inserted before that move
+        self.assertEqual(lines[pushes[1]], 'G1 E10 F2100 ; tool_prepare: push back prepare retraction')
+        self.assertEqual(lines[pushes[1] + 1], 'G1 X11 Y10 E0.5')
+        # Initial tool and later uses unchanged
         self.assertEqual(lines.count('G1 E10 F2100'), 2)
-        # T0 extrudes without an unretract: the retraction is pushed before the move
-        i = lines.index('G1 X11 Y10 E0.5')
-        self.assertEqual(lines[i - 1], 'G1 E10 F2100 ; tool_prepare retraction')
+
+    def test_push_back_before_wipe_tower_extrusion(self):
+        text = SAMPLE.replace('T3 ; change tool\nM109 S225 T3\n',
+                              'T3 ; change tool\nM109 S225 T3\n;TYPE:Wipe tower\n'
+                              'G1 X258 Y132\nG1 X198 E2.69 F2376\n')
+        lines = self.run_on(text, [tokens(), processor()])
+        i = lines.index('G1 X198 E2.69 F2376')
+        self.assertEqual(lines[i - 1], 'G1 E8 F2100 ; tool_prepare: push back prepare retraction')
 
     def test_fixed_retract_length(self):
         lines = self.run_on(SAMPLE, [tokens(), processor(retract_length='5')])
         self.assertTrue(any('RETRACT=5,5,5' in l for l in lines))
-        self.assertIn('G1 E6 F2100 ; +5 tool_prepare retraction', lines)
+        self.assertIn('G1 E5 F2100 ; tool_prepare: push back prepare retraction', lines)
 
     def test_absolute_extrusion_only_set_line(self):
         lines = self.run_on(SAMPLE.replace('M83 ;', 'M82 ;'), [tokens(), processor()])
         self.assertTrue(any(l.startswith('_KTC_PREPARE_TOOLS_SET') for l in lines))
-        self.assertFalse(any('tool_prepare retraction' in l for l in lines))
+        self.assertFalse(any('tool_prepare: push back' in l for l in lines))
 
     def test_without_token_replacer_nothing_changes(self):
         lines = self.run_on(SAMPLE, [processor()])
@@ -223,7 +233,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_prepare_sequence(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, False),
-                             'lane4': FakeLane(4, False)})
+                             'lane4': FakeLane(4, False)}, max_heating='2')
         runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
         s = self.gcode.scripts
         # Staggered heating: T3, 10 s, T0, 10 s, wait for T3, then T4
@@ -245,6 +255,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(rest[-3], 'T4')
         self.assertIn('G1 E-10', rest[-1])
         self.assertIsNone(runtime.data)
+
+    def test_default_three_heaters_without_wait(self):
+        runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
+                             'lane4': FakeLane(4, True)})
+        self.assertEqual(runtime.max_heating, 3)
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        self.assertEqual(self.gcode.scripts[:5], [
+            'SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=225', 'G4 P10000',
+            'SET_HEATER_TEMPERATURE HEATER=extruder TARGET=225', 'G4 P10000',
+            'SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=225'])
 
     def test_loaded_initial_tool_untouched(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
