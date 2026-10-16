@@ -1,8 +1,23 @@
 # KTC G-code Preprocessor
 
-G-code preprocessor for Klipper multi-tool printers (toolchanger, AFC/MMU). Uploaded
-files are preprocessed once by Moonraker: slicer data is extracted, placeholders are
-replaced, idle tools are switched off and a tool summary is printed at print start.
+G-code preprocessor for Klipper multi-tool printers (toolchanger, AFC/MMU).
+
+## Summary
+
+Every uploaded G-code file is processed once by Moonraker, before it is printed.
+Processors can be combined freely:
+
+| Processor | What it does |
+|---|---|
+| [token_replacer](#token_replacer) | reads the slicer settings and replaces placeholders such as `!tool_count!` or `!!curr_bed_type!!` |
+| [idle_tool_shutdown](#idle_tool_shutdown) | switches tools off after their last use or when they will be idle for a long time |
+| [tool_summary](#tool_summary) | prints used tools, temperatures and filament colors to the console at print start |
+| [heat_stats](#heat_stats) | measures how long tool changes wait for the nozzle temperature and suggests preheat time / standby temperature |
+| [tool_prepare](#tool_prepare) | at print start: loads (AFC), purges, brushes and retracts every tool of the print, so the first use of a tool does not miss filament |
+
+Processed files start with `; processed by ktc-gcode preprocessor (slicer: <name>)` and
+are never processed twice. Supported slicers: PrusaSlicer (incl. BOSS fork), SuperSlicer,
+OrcaSlicer, BambuStudio.
 
 Repository: <https://github.com/ChrisFo8390/ktc-gcode-preprocessor>
 (fork of [jwellman80/klipper-gcode-preprocessor](https://github.com/jwellman80/klipper-gcode-preprocessor)).
@@ -34,8 +49,10 @@ Add to `printer.cfg`:
 [include gcode-preprocessor/preprocessor.cfg]
 ```
 
-**Updates** then come through the Mainsail/Fluidd update manager (Klipper and Moonraker
-are restarted). Manually: `git -C ~/ktc-gcode-preprocessor pull` and restart both.
+**Updates** come through the Mainsail/Fluidd update manager (Klipper and Moonraker are
+restarted). Manually: `git -C ~/ktc-gcode-preprocessor pull` and restart both.
+Processors added by an update are available immediately (the `preprocessors/` directory
+is linked as a whole); enable them in `processors`.
 
 ### Switching from jwellman80/klipper-gcode-preprocessor
 
@@ -64,11 +81,15 @@ to uploads.
 
 [gcode_preprocessor]
 enabled: True
-processors: token_replacer, idle_tool_shutdown, tool_summary   # run in this order
+# run in this order; token_replacer first (the others use its slicer data)
+processors: token_replacer, idle_tool_shutdown, tool_summary, heat_stats, tool_prepare
 
 [gcode_preprocessor idle_tool_shutdown]
 idle_timeout_minutes: 2
 ```
+
+All processor sections are optional; the options and defaults are listed with each
+processor below and in `config/gcode-preprocessor.cfg`.
 
 `moonraker.conf`:
 ```ini
@@ -90,13 +111,15 @@ enable_preprocessing: True
 ## Processors
 
 ### token_replacer
-Reads slicer metadata (PrusaSlicer, SuperSlicer, OrcaSlicer, BambuStudio) and replaces
-placeholders in non-comment lines:
+Reads the slicer metadata and replaces placeholders in non-comment lines. The other
+processors use the data it collects, so list it first.
 
 - `!tool_count!`, `!tools!`, `!colors!`, `!materials!`, `!temperatures!`
 - `!!key!!` → any `; key = value` from the slicer config block, e.g.
   `PRINT_START BED_TYPE="!!curr_bed_type!!"`. `;` becomes `,` and `#` is removed
   (`sanitize_generic_values`), so Klipper does not cut the command.
+- Colors come from `filament_colour` (`color_source: filament`) or `extruder_colour`
+  (`color_source: extruder`); empty entries are filled from the other list.
 
 ```ini
 [gcode_preprocessor token_replacer]
@@ -117,7 +140,8 @@ sanitize_generic_values: True
 - **Predictive** (`idle_timeout_minutes` > 0): on a tool change, a tool that will be idle
   longer than the timeout is switched off immediately. The time is estimated from
   G0-G3 moves and G4 dwells without acceleration, so it errs on the safe side.
-- Re-selecting the active tool is ignored. Reheating is up to your tool change macro.
+- Re-selecting the active tool is ignored. Reheating is up to your tool change macro or
+  the slicer.
 
 ```ini
 [gcode_preprocessor idle_tool_shutdown]
@@ -142,7 +166,9 @@ T0: 220 °C (first layer 225 °C)   ■ #FF0000
 T2: 250 °C   ■ #00AEEF
 ```
 
-Needs `token_replacer` before it. Options:
+Single-tool prints show the tool from the print start line (`TOOL=<n>`). Needs
+`token_replacer` before it.
+
 ```ini
 [gcode_preprocessor tool_summary]
 print_start_macros: PRINT_START, START_PRINT
@@ -190,50 +216,62 @@ track_timeout: 900           # s until a preheated tool that is never selected i
 history_file: ~/printer_data/logs/ktc_heat_stats.jsonl
 tool_heaters:                # e.g. 0=extruder, 1=extruder1
 ```
-The section is optional. Heater per tool: `tool_heaters`, else the `extruder` of
-klipper-toolchanger's `[tool Tn]`, else `extruder`/`extruder{n}`. `_KTC_HEAT_MARK` and
-`KTC_HEAT_STATS` are always registered, so files processed with heat_stats also print
-after it was removed from `processors`. Marker times are taken when Klipper reads the line,
-so the measured preheat lead can be off by the move buffer (up to about 2 s).
+
+Heater per tool: `tool_heaters`, else the `extruder` of klipper-toolchanger's
+`[tool Tn]`, else `extruder`/`extruder{n}`. `_KTC_HEAT_MARK` and `KTC_HEAT_STATS` are
+always registered, so files processed with heat_stats also print after it was removed
+from `processors`. Marker times are taken when Klipper reads the line, so the measured
+preheat lead can be off by the move buffer (up to about 2 s).
 
 ### tool_prepare
-Brings every tool of the print into a defined state at print start, so the first use
-of a tool does not miss filament: the slicer retracts each tool by
-`retract_length_toolchange` when it leaves it, but only pushes the travel unretract
-(e.g. `G1 E1`) at the first use of a tool. A tool left retracted by the previous
-print therefore starts about 10 mm short.
+Brings every tool of the print into a defined state at print start. The slicer retracts
+a tool by `retract_length_toolchange` when it leaves it, but at the first use of a tool
+it only pushes the travel unretract (e.g. `G1 E1`, with a wipe tower nothing). A tool
+left retracted by the previous print therefore starts about 10 mm short.
 
-- The processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=4,3,0 TEMPS=225,225,225
-  RETRACT=10,10,10 STANDBY=125,125,125 INITIAL=4` before `PRINT_START` (tools, print
-  temperatures, retraction and standby from the slicer: `filament_retract_length_toolchange`
-  overrides the retraction, standby is `idle_temperature` or temperature +
-  `standby_temperature_delta`) and adds `_KTC_PREPARE_PUSH T=<n> E=<retraction>
-  F=<deretract_speed>` right before the first extrusion after the first tool change
-  of every tool except the initial one (before the travel unretract, or before the
-  first wipe tower extrusion). It pushes only if `KTC_PREPARE_TOOLS` retracted that
-  tool in this print, at most once and never more than was retracted, in its own
-  relative-extrusion state. Needs `token_replacer` before it.
-- Call `KTC_PREPARE_TOOLS` in your `PRINT_START` after homing/probing, before the
-  initial tool is selected and the purge line is printed. It
-  1. checks the AFC lane of every tool and aborts before anything heats if one has no
-     filament (`abort_on_empty`),
-  2. heats the tools one after another, `heat_stagger` seconds apart and not more
-     than `max_heating` at the same time,
-  3. raises to `safe_z` (5 mm) and picks up each tool (initial tool last): a lane not loaded into the extruder is
-     loaded by AFC, which runs its poop/wipe macros; a loaded tool is purged and
-     brushed with the AFC macros (`poop_cmd`/`wipe_cmd` from `[AFC]`); then it
-     retracts by the slicer value and sets the tool to its slicer standby temperature
-     (or `standby_temp`, if set),
-  4. leaves the initial tool picked up and hot. If it was already loaded it is neither
-     purged nor retracted (its filament position is unknown, the purge line primes it).
-- Without the `_KTC_PREPARE_TOOLS_SET` data (file not processed) the command does nothing.
-  `KTC_PREPARE_TOOLS` is always registered (also when `tool_prepare` is not in
-  `processors`), so PRINT_START can call it on every printer. Without a prepare
-  retraction `_KTC_PREPARE_PUSH` does nothing.
-- Without AFC: no lane check and no loading; tools are heated, picked up and purged with
-  `purge_cmd`/`wipe_cmd` if set. Purge/brush macros that are not defined are skipped with a
-  message. A tool that was neither loaded nor purged is not retracted.
-- Aborts with a message if the printer is not homed.
+**Setup**
+1. Add `tool_prepare` to `processors` (after `token_replacer`).
+2. Call `KTC_PREPARE_TOOLS` in your `PRINT_START` after homing/probing, before the
+   initial tool is selected and the purge line is printed:
+   ```
+   CARTOGRAPHER_TOUCH_HOME    # or G28 / your probing
+   KTC_PREPARE_TOOLS
+   ```
+3. Re-upload the file from the slicer.
+
+**At upload** the processor inserts
+- `_KTC_PREPARE_TOOLS_SET TOOLS=4,3,0 TEMPS=225,225,225 RETRACT=10,10,10
+  STANDBY=125,125,125 INITIAL=4` before `PRINT_START`: tools, print temperatures,
+  retraction (`filament_retract_length_toolchange` overrides `retract_length_toolchange`)
+  and standby (`idle_temperature`, else temperature + `standby_temperature_delta`) from
+  the slicer,
+- `_KTC_PREPARE_PUSH T=<n> E=<retraction> F=<deretract_speed>` right before the first
+  extrusion after the first tool change of every tool except the initial one (before
+  the travel unretract, or before the first wipe tower extrusion).
+
+**`KTC_PREPARE_TOOLS`** at print start
+1. checks the AFC lane of every tool and aborts before anything heats if one has no
+   filament (`abort_on_empty`),
+2. heats the tools one after another, `heat_stagger` seconds apart and not more than
+   `max_heating` at the same time,
+3. raises to `safe_z` and picks up each tool (initial tool last):
+   - lane not loaded into the extruder: AFC loads it and runs its poop/wipe macros,
+   - tool already loaded: purged and brushed with the AFC macros (`poop_cmd`/`wipe_cmd`
+     from `[AFC]`) or `purge_cmd`/`wipe_cmd`,
+   - then retracted by the slicer value and set to its standby temperature,
+4. leaves the initial tool picked up and hot. If it was already loaded it is neither
+   purged nor retracted (its filament position is unknown, the purge line primes it).
+
+**`_KTC_PREPARE_PUSH`** pushes only if `KTC_PREPARE_TOOLS` retracted that tool in this
+print, at most once and never more than was retracted, in its own relative-extrusion
+state (also works with `M82`). A tool that was not retracted is not pushed, so the
+print behaves as without tool_prepare.
+
+**Without AFC, macros or processor:** all three commands are always registered.
+Without the `_KTC_PREPARE_TOOLS_SET` data (file not processed) `KTC_PREPARE_TOOLS` only
+reports "skipped". Without AFC there is no lane check and no loading; purge/brush macros
+that are not defined are skipped with a message; a tool that was neither loaded nor
+purged is not retracted. Not homed: aborts with a message.
 
 ```ini
 [gcode_preprocessor tool_prepare]
@@ -244,6 +282,7 @@ abort_on_empty: True    # abort the print if a needed lane has no filament
 purge_initial: False    # also purge an already loaded initial tool
 retract_speed: 35       # mm/s
 safe_z: 5               # raise to this Z before each pickup and purge (never lowers, 0 = off)
+z_speed: 10             # mm/s for the safe_z move
 purge_cmd:              # purge macro, default AFC poop_cmd (if poop enabled), none = off
 wipe_cmd:               # brush macro, default AFC wipe_cmd (if wipe enabled), none = off
 retract_length:         # fixed retraction instead of the slicer value
@@ -259,9 +298,8 @@ tool_heaters:           # e.g. 0=extruder, 1=extruder1
 | `KTC_PREPARE_TOOLS [STAGGER=<s>] [MAX_HEATING=<n>]` | load, purge and retract the tools of the current print (tool_prepare, call from `PRINT_START`) |
 | `KTC_HEAT_STATS [RESET=1]` | heat wait per tool and suggested preheat/standby for the current or last print (heat_stats) |
 
-Processed files start with `; processed by ktc-gcode preprocessor (slicer: <name>)` and
-are not processed again (the old `klipper-gcode-preprocessor` marker is recognized too).
-To reprocess, re-upload the file from the slicer.
+Processed files are not processed again (the old `klipper-gcode-preprocessor` marker is
+recognized too). To reprocess, re-upload the file from the slicer.
 
 ## Troubleshooting
 
@@ -272,6 +310,10 @@ To reprocess, re-upload the file from the slicer.
   changed away from after its last use.
 - Placeholders not replaced → `token_replacer` missing in `processors` or slicer not
   supported.
+- `KTC_PREPARE_TOOLS` reports "skipped" → file uploaded before `tool_prepare` was
+  enabled, or `token_replacer` missing; re-upload.
+- AFC loads but does not purge/brush → `poop_cmd`/`wipe_cmd` missing in `[AFC]`
+  (they have no default in AFC).
 
 ## Custom processors
 
@@ -282,6 +324,8 @@ reset per-file state), `process_line()` (return a list of output lines) and
 `post_process()`, plus a `create_processor(config, logger)` factory. Import the base
 module with `from ..gcode_preprocessor_base import ...` and fall back to
 `from gcode_preprocessor_base import ...` on `ImportError` (Moonraker script).
+Processors that also need commands during the print add a runtime class to
+`RUNTIME_PROCESSORS` in `gcode_preprocessor.py` (see heat_stats, tool_prepare).
 
 Tests: `python3 -m unittest discover -s tests -v`
 
