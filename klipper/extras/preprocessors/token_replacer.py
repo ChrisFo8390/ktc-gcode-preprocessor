@@ -36,6 +36,12 @@ class TokenReplacer(GcodePreprocessorPlugin):
         # Configuration options - Metadata extraction
         self.extract_tools = config.getboolean('extract_tools', True)
         self.extract_colors = config.getboolean('extract_colors', True)
+        # Which slicer color wins per tool: 'filament' (filament_colour) or
+        # 'extruder' (extruder_colour); the other one only fills empty entries
+        self.color_source = (config.get('color_source', 'filament') or 'filament').strip().lower()
+        if self.color_source not in ('filament', 'extruder'):
+            self.logger.warning(f"token_replacer: Unknown color_source '{self.color_source}' - using filament")
+            self.color_source = 'filament'
         self.extract_materials = config.getboolean('extract_materials', True)
         self.extract_temperatures = config.getboolean('extract_temperatures', True)
         self.extract_purge_volumes = config.getboolean('extract_purge_volumes', False)
@@ -55,6 +61,7 @@ class TokenReplacer(GcodePreprocessorPlugin):
         """Reset all per-file state (the processor instance is reused)"""
         self.slicer: Optional[str] = None
         self.colors: List[str] = []
+        self.color_lists: Dict[str, List[str]] = {}
         self.materials: List[str] = []
         self.temperatures: List[str] = []
         self.purge_volumes: List[str] = []
@@ -64,7 +71,6 @@ class TokenReplacer(GcodePreprocessorPlugin):
         self.total_toolchanges: int = 0
 
         # Flags to track if we've found metadata
-        self.found_colors = False
         self.found_materials = False
         self.found_temperatures = False
         self.found_purge_volumes = False
@@ -78,6 +84,15 @@ class TokenReplacer(GcodePreprocessorPlugin):
 
     def get_description(self) -> str:
         return "Extracts slicer metadata and replaces token placeholders (!tool_count!, !colors!, !!any_slicer_key!!, etc.)"
+
+    def _merge_colors(self) -> List[str]:
+        """Preferred color list (color_source), empty entries filled from the other one"""
+        other = 'extruder' if self.color_source == 'filament' else 'filament'
+        preferred = self.color_lists.get(self.color_source, [])
+        fallback = self.color_lists.get(other, [])
+        length = max(len(preferred), len(fallback))
+        return [(preferred[i] if i < len(preferred) else '') or (fallback[i] if i < len(fallback) else '')
+                for i in range(length)]
 
     def pre_process(self, file_path: str, context: PreprocessorContext) -> bool:
         """
@@ -113,17 +128,12 @@ class TokenReplacer(GcodePreprocessorPlugin):
                     self.tools_used.add(tool_number)
                     self.total_toolchanges += 1
 
-            # Extract colors if enabled and not found yet
-            if self.extract_colors and not self.found_colors and GcodePatterns.is_comment(line):
+            # Collect filament_colour and extruder_colour (first occurrence each)
+            if self.extract_colors and GcodePatterns.is_comment(line):
                 match = GcodePatterns.EXTRUDER_COLOR.match(line)
-                if match:
-                    colors_csv = PreprocessorUtilities.parse_csv_list(match.group(1), '#')
-                    if not self.colors:
-                        self.colors.extend(colors_csv)
-                    else:
-                        # Merge, preferring non-empty values
-                        self.colors = [n if o == '' else o for o, n in zip(self.colors, colors_csv)]
-                    self.found_colors = all(len(c) > 0 for c in self.colors)
+                if match and match.group(1).lower() not in self.color_lists:
+                    self.color_lists[match.group(1).lower()] = \
+                        PreprocessorUtilities.parse_csv_list(match.group(2), '#')
 
             # Extract materials if enabled and not found yet
             if self.extract_materials and not self.found_materials and GcodePatterns.is_comment(line):
@@ -156,6 +166,9 @@ class TokenReplacer(GcodePreprocessorPlugin):
                     names_csv = re.split('[;,]', match.group(1).strip())
                     self.filament_names.extend([n.strip().strip('"') for n in names_csv])
                     self.found_filament_names = True
+
+        if self.extract_colors:
+            self.colors = self._merge_colors()
 
         # Log what we found
         self.logger.info(f"token_replacer: Slicer: {self.slicer}")

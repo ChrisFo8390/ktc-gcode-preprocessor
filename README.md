@@ -102,6 +102,7 @@ placeholders in non-comment lines:
 [gcode_preprocessor token_replacer]
 extract_tools: True
 extract_colors: True
+color_source: filament
 extract_materials: True
 extract_temperatures: True
 extract_purge_volumes: False

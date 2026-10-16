@@ -198,6 +198,7 @@ class TestToolSummary(PipelineTestCase):
         for tool, expected in (('0', 'TOOLS=0 TEMPS=220 FIRST_TEMPS=225 COLORS=000000'),
                                ('2', 'TOOLS=2 TEMPS=250 FIRST_TEMPS=255 COLORS=808040'),
                                ('T1', 'TOOLS=1 TEMPS=240 FIRST_TEMPS=245 COLORS=FF8000')):
+            # Only extruder_colour in this file, so it is used
             out = self.process([tokens(), idle(), summary()], self.SINGLE.format(tool=tool))
             index = [i for i, l in enumerate(out) if l.startswith('PRINT_START')][0]
             self.assertEqual(out[index - 1], '_KTC_TOOL_SUMMARY ' + expected, tool)
@@ -206,6 +207,19 @@ class TestToolSummary(PipelineTestCase):
         gcode = self.SINGLE.replace(' TOOL={tool}', '')
         out = self.process([tokens(), summary()], gcode)
         self.assertIn('_KTC_TOOL_SUMMARY TOOLS=0 TEMPS=220 FIRST_TEMPS=225 COLORS=000000', out)
+
+    def test_filament_colour_preferred(self):
+        gcode = (self.SINGLE.format(tool='1')
+                 + "; filament_colour = #FF8000;;#00AEEF\n")
+        out = self.process([tokens(), summary()], gcode)
+        self.assertIn('_KTC_TOOL_SUMMARY TOOLS=1 TEMPS=240 FIRST_TEMPS=245 COLORS=FF8000', out)
+        token = tokens()
+        self.process([token], gcode)
+        # Empty filament entry is filled from extruder_colour
+        self.assertEqual(token.colors, ['FF8000', 'FF8000', '00AEEF'])
+        token = tokens(color_source='extruder')
+        self.process([token], gcode)
+        self.assertEqual(token.colors, ['000000', 'FF8000', '808040'])
 
     def test_multi_tool_unchanged_by_idle_shutdown(self):
         out = self.process([tokens(), idle(), summary()], self.GCODE)

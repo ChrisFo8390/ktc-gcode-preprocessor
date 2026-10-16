@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change; the tool is taken from `TOOL=`/`T=`/`INITIAL_TOOL=`/`INITIAL_EXTRUDER=` of the
   print start line (default T0)
 
+### Changed
+- token_replacer: colors (`!colors!`, tool summary) now come from the slicer's
+  `filament_colour`; `extruder_colour` only fills empty entries. New option
+  `color_source: extruder` restores the previous preference
+
 ## [1.1.0] - 2026-10-09
 
 ### Fixed
