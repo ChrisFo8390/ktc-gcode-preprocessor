@@ -15,7 +15,12 @@
 #   after homing. Checks the AFC lanes of all tools, heats the tools staggered,
 #   then picks up each tool: lanes not loaded into the extruder are loaded by
 #   AFC (which purges/brushes), loaded tools are purged/brushed with the AFC
-#   macros; then the tool is retracted and set to the standby temperature.
+#   macros (or purge_cmd/wipe_cmd); then the tool is retracted and set to the
+#   standby temperature.
+#   Works without AFC and without purge/brush macros: a tool that was neither
+#   loaded nor purged is not retracted (its filament position is unknown). The
+#   commands are always registered, so PRINT_START can call KTC_PREPARE_TOOLS
+#   even when tool_prepare is not listed in processors.
 
 import logging
 import re
@@ -269,6 +274,9 @@ class ToolPrepareRuntime:
         self.safe_z = max(0., options.getfloat('safe_z', 5.))
         self.z_speed = options.getfloat('z_speed', 10.)
         self.purge_initial = options.getboolean('purge_initial', False)
+        # Purge/brush macros: empty = AFC poop_cmd/wipe_cmd (if enabled in [AFC]), 'none' = off
+        self.purge_cmd = (options.get('purge_cmd', '') or '').strip()
+        self.wipe_cmd = (options.get('wipe_cmd', '') or '').strip()
         self.abort_on_empty = options.getboolean('abort_on_empty', True)
         self.tool_heaters = self._parse_tool_heaters(options.get('tool_heaters', ''))
         self.data: Optional[Dict[str, Any]] = None
@@ -316,12 +324,34 @@ class ToolPrepareRuntime:
                 return status
         return None
 
-    def _afc_macro(self, kind: str) -> Optional[str]:
-        """AFC poop/wipe macro if enabled in [AFC]"""
-        afc = self.printer.lookup_object('AFC', None)
-        if afc is None or not getattr(afc, kind, False):
+    def _command_exists(self, name: str) -> bool:
+        if self.printer.lookup_object(f'gcode_macro {name}', None) is not None:
+            return True
+        handlers = getattr(self.gcode, 'ready_gcode_handlers', None)
+        return handlers is not None and name.upper() in handlers
+
+    def _macro(self, kind: str) -> Optional[str]:
+        """Purge ('poop') or brush ('wipe') command, None if not configured or not defined"""
+        name = self.purge_cmd if kind == 'poop' else self.wipe_cmd
+        if not name:
+            afc = self.printer.lookup_object('AFC', None)
+            if afc is None or not getattr(afc, kind, False):
+                return None
+            name = getattr(afc, f'{kind}_cmd', None) or ''
+        if not name or name.lower() == 'none':
             return None
-        return getattr(afc, f'{kind}_cmd', None) or None
+        if not self._command_exists(name):
+            self.gcode.respond_info(f"KTC_PREPARE_TOOLS: {name} not defined - skipped")
+            return None
+        return name
+
+    def _check_homed(self, gcmd):
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is None:
+            return
+        homed = toolhead.get_status(self.reactor.monotonic()).get('homed_axes', '')
+        if not all(axis in homed for axis in 'xyz'):
+            raise gcmd.error("KTC_PREPARE_TOOLS: home all axes first (call it after G28 in PRINT_START)")
 
     def _lift(self):
         """Raise to safe_z (never lowers) so XY travel cannot hit the brush or bucket"""
@@ -368,6 +398,7 @@ class ToolPrepareRuntime:
         if data is None:
             gcmd.respond_info("KTC_PREPARE_TOOLS: no tool data (file not processed by tool_prepare) - skipped")
             return
+        self._check_homed(gcmd)
         stagger = gcmd.get_float('STAGGER', self.heat_stagger, minval=0.)
         max_heating = gcmd.get_int('MAX_HEATING', self.max_heating, minval=0)
         initial = data['initial']
@@ -431,13 +462,21 @@ class ToolPrepareRuntime:
         if was_loaded and is_initial and not self.purge_initial:
             # Filament position unknown, the print start purge line primes it
             return
+        # Freshly loaded by AFC: filament is at the nozzle (AFC purged if enabled)
+        defined = not was_loaded
         if was_loaded:
-            self._lift()
-            for kind in ('poop', 'wipe'):
-                macro = self._afc_macro(kind)
-                if macro:
-                    self._run(f"{macro} EXTRUDER={heater}")
-        if retract > 0:
+            purge, wipe = self._macro('poop'), self._macro('wipe')
+            if purge or wipe:
+                self._lift()
+            if purge:
+                self._run(f"{purge} EXTRUDER={heater}")
+                defined = True
+            if wipe:
+                self._run(f"{wipe} EXTRUDER={heater}")
+        if not defined:
+            # No load and no purge: leave the filament where it is
+            self.gcode.respond_info(f"KTC_PREPARE_TOOLS: T{tool} not purged (no purge macro) - not retracted")
+        elif retract > 0:
             self._run("SAVE_GCODE_STATE NAME=_ktc_prepare\nM83\n"
                       f"G1 E-{retract:g} F{self.retract_speed * 60:g}\n"
                       "RESTORE_GCODE_STATE NAME=_ktc_prepare")

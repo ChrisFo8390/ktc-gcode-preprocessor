@@ -43,7 +43,8 @@ class GcodePreprocessor:
         # it even without a [gcode_preprocessor <name>] section
         for processor_name in RUNTIME_PROCESSORS:
             section_name = f'gcode_preprocessor {processor_name}'
-            if processor_name in self.processors_list and not config.has_section(section_name):
+            wanted = processor_name in self.processors_list or processor_name in ALWAYS_REGISTERED
+            if wanted and not config.has_section(section_name):
                 self.printer.add_object(section_name,
                                         _create_runtime(processor_name, config, {}, section_name))
 
@@ -249,6 +250,9 @@ RUNTIME_PROCESSORS = {
     'heat_stats': 'HeatStatsRuntime',
     'tool_prepare': 'ToolPrepareRuntime',
 }
+# Runtimes whose commands exist even when the processor is not listed, so a
+# PRINT_START calling them works with every file (the command then does nothing)
+ALWAYS_REGISTERED = ('tool_prepare',)
 
 
 def _create_runtime(processor_name, config, values, section_name=None):

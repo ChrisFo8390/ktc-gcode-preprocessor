@@ -226,6 +226,12 @@ print therefore starts about 10 mm short.
   4. leaves the initial tool picked up and hot. If it was already loaded it is neither
      purged nor retracted (its filament position is unknown, the purge line primes it).
 - Without the `_KTC_PREPARE_TOOLS_SET` data (file not processed) the command does nothing.
+  `KTC_PREPARE_TOOLS` is always registered (also when `tool_prepare` is not in
+  `processors`), so PRINT_START can call it on every printer.
+- Without AFC: no lane check and no loading; tools are heated, picked up and purged with
+  `purge_cmd`/`wipe_cmd` if set. Purge/brush macros that are not defined are skipped with a
+  message. A tool that was neither loaded nor purged is not retracted.
+- Aborts with a message if the printer is not homed.
 
 ```ini
 [gcode_preprocessor tool_prepare]
@@ -236,6 +242,8 @@ abort_on_empty: True    # abort the print if a needed lane has no filament
 purge_initial: False    # also purge an already loaded initial tool
 retract_speed: 35       # mm/s
 safe_z: 5               # raise to this Z before each pickup and purge (never lowers, 0 = off)
+purge_cmd:              # purge macro, default AFC poop_cmd (if poop enabled), none = off
+wipe_cmd:               # brush macro, default AFC wipe_cmd (if wipe enabled), none = off
 retract_length:         # fixed retraction instead of the slicer value
 tool_heaters:           # e.g. 0=extruder, 1=extruder1
 ```

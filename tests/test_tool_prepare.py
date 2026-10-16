@@ -170,6 +170,14 @@ class FakeGcodeMove:
         return {'gcode_position': FakePosition(self.z)}
 
 
+class FakeToolhead:
+    def __init__(self):
+        self.homed_axes = 'xyz'
+
+    def get_status(self, eventtime):
+        return {'homed_axes': self.homed_axes}
+
+
 class CommandError(Exception):
     pass
 
@@ -179,6 +187,11 @@ class FakeGcode:
 
     def __init__(self, afc):
         self.commands, self.scripts, self.afc = {}, [], afc
+        self.ready_gcode_handlers = {'AFC_POOP': None, 'AFC_BRUSH': None, 'MY_PURGE': None}
+        self.info = []
+
+    def respond_info(self, msg, log=True):
+        self.info.append(msg)
 
     def register_command(self, name, func, desc=None):
         self.commands[name] = func
@@ -187,7 +200,7 @@ class FakeGcode:
         self.scripts.append(script)
         # AFC's T<n> loads a lane that is not in the extruder yet
         if script.startswith('T') and script[1:].isdigit():
-            lane = self.afc.lanes.get(f'lane{script[1:]}')
+            lane = self.afc.lanes.get(f'lane{script[1:]}') if self.afc else None
             if lane is not None and lane.status['load']:
                 lane.status['tool_loaded'] = True
 
@@ -236,11 +249,15 @@ class FakeGcmd:
 
 
 class RuntimeTests(unittest.TestCase):
-    def make(self, lanes, **options):
-        self.afc = FakeAFC(lanes)
+    def make(self, lanes, afc=True, **options):
+        self.afc = FakeAFC(lanes) if afc else None
         self.gcode = FakeGcode(self.afc)
         self.gcode_move = FakeGcodeMove()
-        printer = FakePrinter({'gcode': self.gcode, 'AFC': self.afc, 'gcode_move': self.gcode_move})
+        self.toolhead = FakeToolhead()
+        objects = {'gcode': self.gcode, 'gcode_move': self.gcode_move, 'toolhead': self.toolhead}
+        if afc:
+            objects['AFC'] = self.afc
+        printer = FakePrinter(objects)
         runtime = tool_prepare.ToolPrepareRuntime(FakeConfig(printer), options)
         runtime.cmd_SET(FakeGcmd(TOOLS='4,3,0', TEMPS='225,225,225', RETRACT='10,10,10',
                                  STANDBY='125,125,125', INITIAL=4))
@@ -289,6 +306,39 @@ class RuntimeTests(unittest.TestCase):
             'SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=225', 'G4 P10000',
             'SET_HEATER_TEMPERATURE HEATER=extruder TARGET=225', 'G4 P10000',
             'SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=225'])
+
+    def test_without_afc_nothing_purged_or_retracted(self):
+        runtime = self.make({}, afc=False, heat_stagger='0', safe_z='0')
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        s = self.gcode.scripts
+        self.assertFalse(any('AFC_' in x or 'G1 E-' in x for x in s))
+        # Tools are still heated, picked up and set to standby
+        self.assertIn('T3', s)
+        self.assertIn('SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=125', s)
+        self.assertTrue(any('not retracted' in m for m in self.gcode.info))
+
+    def test_without_afc_custom_purge_macro(self):
+        runtime = self.make({}, afc=False, heat_stagger='0', safe_z='0', purge_cmd='MY_PURGE')
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        s = self.gcode.scripts
+        i = s.index('MY_PURGE EXTRUDER=extruder3')
+        self.assertIn('G1 E-10', s[i + 1])
+
+    def test_missing_macros_skipped(self):
+        runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
+                             'lane4': FakeLane(4, True)}, heat_stagger='0', safe_z='0')
+        self.gcode.ready_gcode_handlers = {}
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        self.assertFalse(any(x.startswith('AFC_') for x in self.gcode.scripts))
+        self.assertTrue(any('AFC_POOP not defined' in m for m in self.gcode.info))
+        self.assertFalse(any('G1 E-' in x for x in self.gcode.scripts))
+
+    def test_not_homed_aborts(self):
+        runtime = self.make({'lane3': FakeLane(3, True)})
+        self.toolhead.homed_axes = 'xy'
+        with self.assertRaises(CommandError):
+            runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        self.assertEqual(self.gcode.scripts, [])
 
     def test_no_lift_when_already_high(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
