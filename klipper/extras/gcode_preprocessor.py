@@ -39,13 +39,13 @@ class GcodePreprocessor:
         # Registry of available processors
         self.processors: List[gcode_preprocessor_base.GcodePreprocessorPlugin] = []
 
-        # heat_stats also measures during the print: its commands must exist
-        # even without a [gcode_preprocessor heat_stats] section
-        if ('heat_stats' in self.processors_list
-                and not config.has_section('gcode_preprocessor heat_stats')):
-            from .preprocessors import heat_stats
-            self.printer.add_object('gcode_preprocessor heat_stats',
-                                    heat_stats.HeatStatsRuntime(config, {}, 'gcode_preprocessor heat_stats'))
+        # Processors with a runtime part (commands used during the print) need
+        # it even without a [gcode_preprocessor <name>] section
+        for processor_name in RUNTIME_PROCESSORS:
+            section_name = f'gcode_preprocessor {processor_name}'
+            if processor_name in self.processors_list and not config.has_section(section_name):
+                self.printer.add_object(section_name,
+                                        _create_runtime(processor_name, config, {}, section_name))
 
         # Register for klippy events
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
@@ -244,11 +244,22 @@ class GcodePreprocessor:
 def load_config(config):
     return GcodePreprocessor(config)
 
+# Processors that also run inside Klipper during the print: module -> runtime class
+RUNTIME_PROCESSORS = {
+    'heat_stats': 'HeatStatsRuntime',
+    'tool_prepare': 'ToolPrepareRuntime',
+}
+
+
+def _create_runtime(processor_name, config, values, section_name=None):
+    module = importlib.import_module(f".preprocessors.{processor_name}", package=__package__)
+    return getattr(module, RUNTIME_PROCESSORS[processor_name])(config, values, section_name)
+
+
 def load_config_prefix(config):
     """Allow [gcode_preprocessor ...] config sections to be defined"""
     section = PreprocessorConfigSection(config)
-    if config.get_name().split(None, 1)[-1].strip() == 'heat_stats':
-        # heat_stats also has a runtime part that measures during the print
-        from .preprocessors import heat_stats
-        return heat_stats.HeatStatsRuntime(config, section.values)
+    processor_name = config.get_name().split(None, 1)[-1].strip()
+    if processor_name in RUNTIME_PROCESSORS:
+        return _create_runtime(processor_name, config, section.values)
     return section

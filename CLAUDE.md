@@ -109,6 +109,12 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
    - Pure `summarize()`/`format_report()` compute the suggestions (testable without Klipper)
    - See `klipper/extras/preprocessors/heat_stats.py`
 
+5. **tool_prepare**
+   - Processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. INITIAL=..` before the print start macro (data from `token_replacer`'s slicer_config) and extends the first pure unretract (`G1 E..`) after the first tool change of each non-initial tool by the tool change retraction (relative extrusion only)
+   - `ToolPrepareRuntime` (same file): `_KTC_PREPARE_TOOLS_SET` stores the data, `KTC_PREPARE_TOOLS` (called from the user's PRINT_START) checks AFC lanes (`AFC.lanes[..].get_status()`: `map`, `load`, `tool_loaded`), heats per `heating_plan()`, runs `T<n>`, AFC `poop_cmd`/`wipe_cmd` for already loaded tools, retracts, sets standby
+   - Runtime classes are wired via `RUNTIME_PROCESSORS` in `gcode_preprocessor.py` (also used by heat_stats)
+   - See `klipper/extras/preprocessors/tool_prepare.py`
+
 ### Key Patterns
 
 **Tool Change Detection:**
