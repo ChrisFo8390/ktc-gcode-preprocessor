@@ -157,6 +157,19 @@ class FakeAFC:
         self.wipe, self.wipe_cmd = True, 'AFC_BRUSH'
 
 
+class FakePosition:
+    def __init__(self, z):
+        self.z = z
+
+
+class FakeGcodeMove:
+    def __init__(self):
+        self.z = 1.
+
+    def get_status(self, eventtime):
+        return {'gcode_position': FakePosition(self.z)}
+
+
 class CommandError(Exception):
     pass
 
@@ -226,7 +239,8 @@ class RuntimeTests(unittest.TestCase):
     def make(self, lanes, **options):
         self.afc = FakeAFC(lanes)
         self.gcode = FakeGcode(self.afc)
-        printer = FakePrinter({'gcode': self.gcode, 'AFC': self.afc})
+        self.gcode_move = FakeGcodeMove()
+        printer = FakePrinter({'gcode': self.gcode, 'AFC': self.afc, 'gcode_move': self.gcode_move})
         runtime = tool_prepare.ToolPrepareRuntime(FakeConfig(printer), options)
         runtime.cmd_SET(FakeGcmd(TOOLS='4,3,0', TEMPS='225,225,225', RETRACT='10,10,10',
                                  STANDBY='125,125,125', INITIAL=4))
@@ -249,14 +263,18 @@ class RuntimeTests(unittest.TestCase):
             'SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=225'])
         rest = s[6:]
         # T3 not loaded: AFC loads and purges, we only retract and set standby
+        lift = 'SAVE_GCODE_STATE NAME=_ktc_prepare_z\nG90\nG1 Z5 F600\nRESTORE_GCODE_STATE NAME=_ktc_prepare_z'
         i = rest.index('T3')
+        # Safe Z before picking up the tool
+        self.assertEqual(rest[i - 1], lift)
         self.assertNotIn('AFC_POOP EXTRUDER=extruder3', rest)
         self.assertIn('G1 E-10 F2100', rest[i + 2])
         # Slicer standby (225 - 100)
         self.assertEqual(rest[i + 3], 'SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=125')
         # T0 already loaded: purged and brushed by us
         i = rest.index('T0')
-        self.assertEqual(rest[i + 2:i + 4], ['AFC_POOP EXTRUDER=extruder', 'AFC_BRUSH EXTRUDER=extruder'])
+        # Safe Z again before the purge travel
+        self.assertEqual(rest[i + 2:i + 5], [lift, 'AFC_POOP EXTRUDER=extruder', 'AFC_BRUSH EXTRUDER=extruder'])
         # Initial tool last, loaded by AFC, retracted, keeps its temperature
         self.assertEqual(rest[-3], 'T4')
         self.assertIn('G1 E-10', rest[-1])
@@ -272,6 +290,13 @@ class RuntimeTests(unittest.TestCase):
             'SET_HEATER_TEMPERATURE HEATER=extruder TARGET=225', 'G4 P10000',
             'SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=225'])
 
+    def test_no_lift_when_already_high(self):
+        runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
+                             'lane4': FakeLane(4, True)})
+        self.gcode_move.z = 8.
+        runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
+        self.assertFalse(any('_ktc_prepare_z' in s for s in self.gcode.scripts))
+
     def test_standby_temp_option_overrides_slicer(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
                              'lane4': FakeLane(4, True)}, standby_temp='0')
@@ -281,7 +306,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_loaded_initial_tool_untouched(self):
         runtime = self.make({'lane0': FakeLane(0, True), 'lane3': FakeLane(3, True),
-                             'lane4': FakeLane(4, True)}, max_heating='0', heat_stagger='0')
+                             'lane4': FakeLane(4, True)}, max_heating='0', heat_stagger='0', safe_z='0')
         runtime.cmd_KTC_PREPARE_TOOLS(FakeGcmd())
         s = self.gcode.scripts
         i = s.index('T4')

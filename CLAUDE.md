@@ -111,7 +111,7 @@ The preprocessor uses a three-phase pipeline where each processor gets three pas
 
 5. **tool_prepare**
    - Processor inserts `_KTC_PREPARE_TOOLS_SET TOOLS=.. TEMPS=.. RETRACT=.. STANDBY=.. INITIAL=..` before the print start macro (data from `token_replacer`'s slicer_config) and inserts `G1 E<retraction> F<deretract_speed>` before the first extrusion (first G0-G3 with positive E) after the first tool change of each non-initial tool (relative extrusion only)
-   - `ToolPrepareRuntime` (same file): `_KTC_PREPARE_TOOLS_SET` stores the data, `KTC_PREPARE_TOOLS` (called from the user's PRINT_START) checks AFC lanes (`AFC.lanes[..].get_status()`: `map`, `load`, `tool_loaded`), heats per `heating_plan()`, runs `T<n>`, AFC `poop_cmd`/`wipe_cmd` for already loaded tools, retracts, sets the slicer standby (`standby_temp` overrides)
+   - `ToolPrepareRuntime` (same file): `_KTC_PREPARE_TOOLS_SET` stores the data, `KTC_PREPARE_TOOLS` (called from the user's PRINT_START) checks AFC lanes (`AFC.lanes[..].get_status()`: `map`, `load`, `tool_loaded`), heats per `heating_plan()`, lifts to `safe_z`, runs `T<n>`, AFC `poop_cmd`/`wipe_cmd` for already loaded tools, retracts, sets the slicer standby (`standby_temp` overrides)
    - Runtime classes are wired via `RUNTIME_PROCESSORS` in `gcode_preprocessor.py` (also used by heat_stats)
    - See `klipper/extras/preprocessors/tool_prepare.py`
 

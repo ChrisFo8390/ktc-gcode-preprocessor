@@ -218,7 +218,7 @@ print therefore starts about 10 mm short.
      filament (`abort_on_empty`),
   2. heats the tools one after another, `heat_stagger` seconds apart and not more
      than `max_heating` at the same time,
-  3. picks up each tool (initial tool last): a lane not loaded into the extruder is
+  3. raises to `safe_z` (5 mm) and picks up each tool (initial tool last): a lane not loaded into the extruder is
      loaded by AFC, which runs its poop/wipe macros; a loaded tool is purged and
      brushed with the AFC macros (`poop_cmd`/`wipe_cmd` from `[AFC]`); then it
      retracts by the slicer value and sets the tool to its slicer standby temperature
@@ -235,6 +235,7 @@ standby_temp:           # until first use; default: slicer standby (e.g. 225 - 1
 abort_on_empty: True    # abort the print if a needed lane has no filament
 purge_initial: False    # also purge an already loaded initial tool
 retract_speed: 35       # mm/s
+safe_z: 5               # raise to this Z before each pickup and purge (never lowers, 0 = off)
 retract_length:         # fixed retraction instead of the slicer value
 tool_heaters:           # e.g. 0=extruder, 1=extruder1
 ```

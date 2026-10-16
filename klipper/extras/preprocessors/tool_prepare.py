@@ -265,6 +265,9 @@ class ToolPrepareRuntime:
         self.standby_temp = options.getfloat('standby_temp', None)
         self.temp_tolerance = options.getfloat('temp_tolerance', 2.)
         self.retract_speed = options.getfloat('retract_speed', 35.)
+        # Travel height before picking up a tool and before purging (0 = off)
+        self.safe_z = max(0., options.getfloat('safe_z', 5.))
+        self.z_speed = options.getfloat('z_speed', 10.)
         self.purge_initial = options.getboolean('purge_initial', False)
         self.abort_on_empty = options.getboolean('abort_on_empty', True)
         self.tool_heaters = self._parse_tool_heaters(options.get('tool_heaters', ''))
@@ -319,6 +322,19 @@ class ToolPrepareRuntime:
         if afc is None or not getattr(afc, kind, False):
             return None
         return getattr(afc, f'{kind}_cmd', None) or None
+
+    def _lift(self):
+        """Raise to safe_z (never lowers) so XY travel cannot hit the brush or bucket"""
+        if self.safe_z <= 0:
+            return
+        gcode_move = self.printer.lookup_object('gcode_move', None)
+        if gcode_move is not None:
+            z = gcode_move.get_status(self.reactor.monotonic())['gcode_position'].z
+            if z >= self.safe_z:
+                return
+        self._run("SAVE_GCODE_STATE NAME=_ktc_prepare_z\nG90\n"
+                  f"G1 Z{self.safe_z:g} F{self.z_speed * 60:g}\n"
+                  "RESTORE_GCODE_STATE NAME=_ktc_prepare_z")
 
     def _run(self, script: str):
         self.gcode.run_script_from_command(script)
@@ -404,6 +420,7 @@ class ToolPrepareRuntime:
     def _prepare(self, tool: int, heater: str, temp: float, retract: float, standby: float,
                  lane: Optional[Dict[str, Any]], is_initial: bool):
         was_loaded = lane is None or bool(lane.get('tool_loaded'))
+        self._lift()
         self._run(f"T{tool}")   # AFC loads (and purges/brushes) a lane not in the extruder
         if lane is not None and not was_loaded:
             after = self._lane(tool)
@@ -415,6 +432,7 @@ class ToolPrepareRuntime:
             # Filament position unknown, the print start purge line primes it
             return
         if was_loaded:
+            self._lift()
             for kind in ('poop', 'wipe'):
                 macro = self._afc_macro(kind)
                 if macro:
