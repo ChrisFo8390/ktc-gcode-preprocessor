@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the print; command `KTC_HEAT_STATS [RESET=1]`, history in
   `~/printer_data/logs/ktc_heat_stats.jsonl`
 
+### Fixed
+- tool_summary now also prints the summary for single-tool prints without any tool
+  change; the tool is taken from `TOOL=`/`T=`/`INITIAL_TOOL=`/`INITIAL_EXTRUDER=` of the
+  print start line (default T0)
+
 ## [1.1.0] - 2026-10-09
 
 ### Fixed
